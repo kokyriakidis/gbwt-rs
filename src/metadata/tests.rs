@@ -13,7 +13,6 @@ const SAMPLES: usize = 5;
 const CONTIGS: usize = 4;
 const PHASES: usize = 2;
 
-// FIXME: using a builder
 fn create_metadata(paths: bool, samples: bool, contigs: bool) -> Metadata {
     let mut header = Header::<MetadataPayload>::new();
     header.payload_mut().sample_count = SAMPLES;
@@ -248,6 +247,104 @@ fn full_path_name_haplotype() {
     let string_name = format!("{}#{}#{}@{}", sample, haplotype, contig, fragment);
     assert_eq!(path_name.to_string(), string_name, "Wrong string representation");
     check_path_name(&path_name, sample, contig, haplotype, fragment, 4800);
+}
+
+//-----------------------------------------------------------------------------
+
+fn compare_full_metadata(metadata: &Metadata, truth: &Metadata) {
+    let same_metadata = metadata == truth;
+    if same_metadata {
+        return;
+    }
+
+    let same_headers = metadata.header == truth.header;
+    if !same_headers {
+        assert_eq!(metadata.header.payload().sample_count, truth.header.payload().sample_count, "Sample counts differ");
+        assert_eq!(metadata.header.payload().haplotype_count, truth.header.payload().haplotype_count, "Haplotype counts differ");
+        assert_eq!(metadata.header.payload().contig_count, truth.header.payload().contig_count, "Contig counts differ");
+    }
+    assert!(same_headers, "Headers differ");
+
+    let same_path_names = metadata.path_names == truth.path_names;
+    if !same_path_names {
+        assert_eq!(metadata.path_names.len(), truth.path_names.len(), "Path name counts differ");
+        for (i, (path_name, truth_path_name)) in metadata.path_names.iter().zip(truth.path_names.iter()).enumerate() {
+            assert_eq!(path_name.sample(), truth_path_name.sample(), "Sample ids differ for path name {}", i);
+            assert_eq!(path_name.contig(), truth_path_name.contig(), "Contig ids differ for path name {}", i);
+            assert_eq!(path_name.phase(), truth_path_name.phase(), "Haplotype numbers differ for path name {}", i);
+            assert_eq!(path_name.fragment(), truth_path_name.fragment(), "Fragment numbers differ for path name {}", i);
+        }
+    }
+    assert!(same_path_names, "Path names differ");
+
+    let same_sample_names = metadata.sample_names == truth.sample_names;
+    if !same_sample_names {
+        assert_eq!(metadata.sample_names.len(), truth.sample_names.len(), "Sample name counts differ");
+        for i in 0..metadata.sample_names.len() {
+            let sample_name = metadata.sample_name(i);
+            let truth_sample_name = truth.sample_name(i);
+            assert_eq!(sample_name, truth_sample_name, "Sample names differ for sample name {}", i);
+        }
+    }
+    assert!(same_sample_names, "Sample names differ");
+
+    let same_contig_names = metadata.contig_names == truth.contig_names;
+    if !same_contig_names {
+        assert_eq!(metadata.contig_names.len(), truth.contig_names.len(), "Contig name counts differ");
+        for i in 0..metadata.contig_names.len() {
+            let contig_name = metadata.contig_name(i);
+            let truth_contig_name = truth.contig_name(i);
+            assert_eq!(contig_name, truth_contig_name, "Contig names differ for contig name {}", i);
+        }
+    }
+    assert!(same_contig_names, "Contig names differ");
+}
+
+#[test]
+fn metadata_builder_empty() {
+    let empty = Metadata::from(MetadataBuilder::new());
+
+    assert!(empty.has_path_names(), "Empty metadata should have path names");
+    assert_eq!(empty.paths(), 0, "Empty metadata should have zero paths");
+
+    assert!(empty.has_sample_names(), "Empty metadata should have sample names");
+    assert_eq!(empty.samples(), 0, "Empty metadata should have zero samples");
+    assert_eq!(empty.haplotypes(), 0, "Empty metadata should have zero haplotypes");
+
+    assert!(empty.has_contig_names(), "Empty metadata should have contig names");
+    assert_eq!(empty.contigs(), 0, "Empty metadata should have zero contigs");
+}
+
+#[test]
+fn metadata_builder() {
+    let truth = create_metadata(true, true, true);
+
+    let mut builder = MetadataBuilder::new();
+    for path_id in 0..truth.paths() {
+        let full_path_name = FullPathName::from_metadata(&truth, path_id).unwrap();
+        let result = builder.insert(&full_path_name);
+        assert!(result.is_ok(), "Failed to insert path name {} to builder: {}", path_id, result.err().unwrap());
+    }
+    let metadata = Metadata::from(builder);
+
+    compare_full_metadata(&metadata, &truth);
+}
+
+#[test]
+fn metadata_builder_duplicates() {
+    let truth = create_metadata(true, true, true);
+
+    let mut builder = MetadataBuilder::new();
+    for path_id in 0..truth.paths() {
+        let full_path_name = FullPathName::from_metadata(&truth, path_id).unwrap();
+        let result = builder.insert(&full_path_name);
+        assert!(result.is_ok(), "Failed to insert path name {} to builder: {}", path_id, result.err().unwrap());
+        let result = builder.insert(&full_path_name);
+        assert!(result.is_err(), "Expected an error when inserting a duplicate path name {} to the builder", path_id);
+    }
+    let metadata = Metadata::from(builder);
+
+    compare_full_metadata(&metadata, &truth);
 }
 
 //-----------------------------------------------------------------------------

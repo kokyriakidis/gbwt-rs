@@ -52,7 +52,7 @@ pub use crate::bwt::Pos;
 pub use crate::gbwt::{GBWT, SearchState, BidirectionalState};
 pub use crate::gbz::GBZ;
 pub use crate::sequences::Segment;
-pub use crate::metadata::{Metadata, PathName, FullPathName};
+pub use crate::metadata::{Metadata, MetadataBuilder, PathName, FullPathName};
 pub use crate::support::{GraphPosition, Orientation};
 
 //-----------------------------------------------------------------------------

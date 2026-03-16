@@ -204,9 +204,10 @@ impl From<BWTBuilder> for BWT {
 
 //-----------------------------------------------------------------------------
 
+// FIXME: no longer only for testing
 /// A structure for building the BWT by appending node records.
 ///
-/// This is mostly inteded for testing at the moment, as no BWT construction algorithms have been implemented.
+/// This is mostly intended for testing at the moment, as no BWT construction algorithms have been implemented.
 /// See module-level documentation for an example.
 #[derive(Clone, Debug, Default)]
 pub struct BWTBuilder {
@@ -232,6 +233,8 @@ impl BWTBuilder {
         self.len() == 0
     }
 
+    // FIXME: this version takes edge ranks and is more appropriate for testing.
+    // FIXME: we should create a version that takes node ids and uses the edges for converting them to ranks.
     /// Appends a new record to the BWT.
     ///
     /// The record consists of a list of edges and a list of runs.

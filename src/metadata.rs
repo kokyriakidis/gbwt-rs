@@ -1,5 +1,10 @@
 //! Metadata for GBWT paths.
-// FIXME: construction using builder
+//!
+//! Path metadata is stored as an [`Metadata`] structure.
+//! If path names are present, they are stored as an ordered set of [`PathName`] objects.
+//! Sample and contig fields in path names may have corresponding string names in the metadata.
+//! [`FullPathName`] objects store sample and contig names in the path name itself.
+//! [`MetadataBuilder`] can be used for creating metadata from [`FullPathName`] objects.
 
 use crate::{GENERIC_SAMPLE, GENERIC_HAPLOTYPE};
 use crate::headers::{Header, MetadataPayload};
@@ -7,6 +12,7 @@ use crate::support::{Dictionary, StringIter};
 
 use simple_sds::serialize::{Serialize, Serializable};
 
+use std::collections::{HashMap, HashSet};
 use std::io::{Error, ErrorKind};
 use std::{fmt, io, slice};
 
@@ -27,15 +33,22 @@ mod tests;
 /// Each path name is a unique combination of four fields: sample, contig, phase, and fragment (see [`PathName`]).
 /// The first two must be in the intervals `0..self.samples()` and `0..self.contigs()`, respectively.
 ///
+/// Metadata objects with path, sample, and contig names can be created using [`MetadataBuilder`].
+///
 /// # Examples
 ///
 /// ```
-/// use gbz::{Metadata, FullPathName};
-/// use gbz::support;
-/// use simple_sds::serialize;
+/// use gbz::{Metadata, MetadataBuilder, FullPathName};
 ///
-/// let filename = support::get_test_data("example.meta");
-/// let metadata: Metadata = serialize::load_from(&filename).unwrap();
+/// // This is the `example.meta` test case.
+/// let mut builder = MetadataBuilder::new();
+/// let _ = builder.insert(&FullPathName::generic("A"));
+/// let _ = builder.insert(&FullPathName::generic("B"));
+/// let _ = builder.insert(&FullPathName::haplotype("sample", "A", 1, 0));
+/// let _ = builder.insert(&FullPathName::haplotype("sample", "A", 2, 0));
+/// let _ = builder.insert(&FullPathName::haplotype("sample", "B", 1, 0));
+/// let _ = builder.insert(&FullPathName::haplotype("sample", "B", 2, 0));
+/// let metadata = Metadata::from(builder);
 ///
 /// assert!(metadata.has_path_names());
 /// assert_eq!(metadata.paths(), 6);
@@ -339,6 +352,30 @@ impl Serialize for Metadata {
     }
 }
 
+impl From<MetadataBuilder> for Metadata {
+    fn from(builder: MetadataBuilder) -> Self {
+        let mut header = Header::<MetadataPayload>::default();
+        header.payload_mut().sample_count = builder.sample_names.len();
+        header.payload_mut().contig_count = builder.contig_names.len();
+        header.payload_mut().haplotype_count = builder.haplotypes.len();
+        header.set(MetadataPayload::FLAG_PATH_NAMES);
+        header.set(MetadataPayload::FLAG_SAMPLE_NAMES);
+        header.set(MetadataPayload::FLAG_CONTIG_NAMES);
+
+        let path_names = builder.path_names;
+        let sample_names = Dictionary::try_from(builder.sample_names).unwrap_or_else(|_|
+            panic!("Metadata: Inconsistent sample names in MetadataBuilder")
+        );
+        let contig_names = Dictionary::try_from(builder.contig_names).unwrap_or_else(|_|
+            panic!("Metadata: Inconsistent contig names in MetadataBuilder")
+        );
+
+        Metadata {
+            header, path_names, sample_names, contig_names,
+        }
+    }
+}
+
 //-----------------------------------------------------------------------------
 
 /// A structured path name relative to [`Metadata`].
@@ -513,6 +550,73 @@ impl fmt::Display for FullPathName {
         } else {
             write!(f, "{}#{}#{}@{}", self.sample, self.haplotype, self.contig, self.fragment)
         }
+    }
+}
+
+//-----------------------------------------------------------------------------
+
+/// A builder that creates [`Metadata`] from [`FullPathName`] objects.
+///
+/// The created metadata will contain path, sample, and contig names.
+/// Path names must be added in the same order as the paths in the corresponding [`crate::GBWT`] index.
+/// See [`Metadata`] for an example.
+pub struct MetadataBuilder {
+    sample_names: Vec<String>,
+    sample_set: HashMap<String, usize>,
+    contig_names: Vec<String>,
+    contig_set: HashMap<String, usize>,
+    path_names: Vec<PathName>,
+    path_set: HashSet<PathName>,
+    haplotypes: HashSet<(usize, usize)>,
+}
+
+impl MetadataBuilder {
+    /// Creates a new metadata builder.
+    pub fn new() -> Self {
+        MetadataBuilder {
+            sample_names: Vec::new(),
+            sample_set: HashMap::new(),
+            contig_names: Vec::new(),
+            contig_set: HashMap::new(),
+            path_names: Vec::new(),
+            path_set: HashSet::new(),
+            haplotypes: HashSet::new(),
+        }
+    }
+
+    /// Inserts a path name to the builder.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path name is a duplicate of an already inserted path name.
+    /// If an error occurs, the builder is not modified.
+    pub fn insert(&mut self, name: &FullPathName) -> Result<(), String> {
+        let sample_id = self.sample_set.get(&name.sample).cloned().unwrap_or(self.sample_names.len());
+        let contig_id = self.contig_set.get(&name.contig).cloned().unwrap_or(self.contig_names.len());
+        let path_name = PathName::from_fields(sample_id, contig_id, name.haplotype, name.fragment);
+        if self.path_set.contains(&path_name) {
+            return Err(format!("MetadataBuilder: Duplicate path name {}", name));
+        }
+
+        if sample_id == self.sample_names.len() {
+            self.sample_names.push(name.sample.clone());
+            self.sample_set.insert(name.sample.clone(), sample_id);
+        }
+        if contig_id == self.contig_names.len() {
+            self.contig_names.push(name.contig.clone());
+            self.contig_set.insert(name.contig.clone(), contig_id);
+        }
+        self.path_names.push(path_name);
+        self.path_set.insert(path_name);
+        self.haplotypes.insert((sample_id, name.haplotype));
+
+        Ok(())
+    }
+}
+
+impl Default for MetadataBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
