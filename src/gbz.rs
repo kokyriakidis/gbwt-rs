@@ -13,9 +13,9 @@
 //! See also the [C++ implementation](https://github.com/jltsiren/gbwtgraph) and the [file format specification](https://github.com/jltsiren/gbwtgraph/blob/master/SERIALIZATION.md).
 
 use crate::{ENDMARKER, SOURCE_KEY, SOURCE_VALUE, GENERIC_SAMPLE, REFERENCE_SAMPLES_KEY};
-use crate::{Segment, GBWT, BidirectionalState, Orientation, Pos};
+use crate::{Segment, GBWT, BidirectionalState, Orientation, Pos, Metadata};
 use crate::bwt::Record;
-use crate::gbwt::{SequenceIter, Metadata};
+use crate::gbwt::SequenceIter;
 use crate::graph::Graph;
 use crate::graph::SegmentIter as GraphSegmentIter;
 use crate::headers::{Header, GBZPayload};

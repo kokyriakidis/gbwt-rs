@@ -38,6 +38,7 @@ pub mod gbwt;
 pub mod gbz;
 pub mod graph;
 pub mod headers;
+pub mod metadata;
 pub mod support;
 
 // Shared internal code for the binaries.
@@ -48,9 +49,10 @@ pub mod internal;
 //-----------------------------------------------------------------------------
 
 pub use crate::bwt::Pos;
-pub use crate::gbwt::{GBWT, SearchState, BidirectionalState, Metadata, PathName, FullPathName};
+pub use crate::gbwt::{GBWT, SearchState, BidirectionalState};
 pub use crate::gbz::GBZ;
 pub use crate::graph::Segment;
+pub use crate::metadata::{Metadata, PathName, FullPathName};
 pub use crate::support::{GraphPosition, Orientation};
 
 //-----------------------------------------------------------------------------
