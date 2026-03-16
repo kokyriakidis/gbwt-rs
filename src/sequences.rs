@@ -1,12 +1,12 @@
 //! GBWTGraph: Node sequences and node-to-segment translation.
 //!
-//! The [`Graph`] structure augments a [`crate::GBWT`] index with node sequences and an optional node-to-segment translation.
+//! The [`Sequences`] structure augments a [`crate::GBWT`] index with node sequences and an optional node-to-segment translation.
 //! This enables representing bidirected sequence graphs compatible with a subset of the [GFA format](https://github.com/GFA-spec/GFA-spec/blob/master/GFA1.md).
 //! Unlike in the [C++ implementation](https://github.com/jltsiren/gbwtgraph), the actual graph interface is provided by the [`crate::GBZ`] structure.
 //!
 //! At the moment, this implementation only supports graphs built with other tools.
 
-use crate::headers::{Header, GraphPayload};
+use crate::headers::{Header, SequencesPayload};
 use crate::support::{StringArray, StringIter};
 
 use simple_sds::ops::{BitVec, Select, PredSucc};
@@ -38,19 +38,19 @@ mod tests;
 /// ## Sequences
 ///
 /// ```
-/// use gbz::graph::Graph;
+/// use gbz::sequences::Sequences;
 /// use gbz::support;
 /// use simple_sds::serialize;
 ///
 /// let filename = support::get_test_data("example.gg");
-/// let graph: Graph = serialize::load_from(&filename).unwrap();
+/// let sequences: Sequences = serialize::load_from(&filename).unwrap();
 ///
-/// assert_eq!(graph.nodes(), 12);
-/// assert_eq!(graph.sequences(), 15);
-/// assert_eq!(graph.sequence(13), "T".as_bytes());
-/// assert_eq!(graph.sequence_len(3), 1);
+/// assert_eq!(sequences.nodes(), 12);
+/// assert_eq!(sequences.sequences(), 15);
+/// assert_eq!(sequences.sequence(13), "T".as_bytes());
+/// assert_eq!(sequences.sequence_len(3), 1);
 ///
-/// let labels: Vec<&[u8]> = graph.iter().collect();
+/// let labels: Vec<&[u8]> = sequences.iter().collect();
 /// assert_eq!(labels.concat(), "GATTACAGATTA".as_bytes());
 /// ```
 ///
@@ -58,31 +58,31 @@ mod tests;
 ///
 /// ```
 /// use gbz::Segment;
-/// use gbz::graph::Graph;
+/// use gbz::sequences::Sequences;
 /// use gbz::support;
 /// use simple_sds::serialize;
 ///
 /// let filename = support::get_test_data("translation.gg");
-/// let graph: Graph = serialize::load_from(&filename).unwrap();
+/// let sequences: Sequences = serialize::load_from(&filename).unwrap();
 ///
-/// assert!(graph.has_translation());
-/// assert_eq!(graph.segments(), 8);
+/// assert!(sequences.has_translation());
+/// assert_eq!(sequences.segments(), 8);
 ///
 /// let first = Segment::from_fields(0, "s11".as_bytes(), 1..3, "GAT".as_bytes());
-/// assert_eq!(graph.segment(0), first);
+/// assert_eq!(sequences.segment(0), first);
 ///
 /// let middle = Segment::from_fields(3, "s14".as_bytes(), 5..7, "CAG".as_bytes());
-/// assert_eq!(graph.node_to_segment(6), middle);
+/// assert_eq!(sequences.node_to_segment(6), middle);
 ///
 /// let last = Segment::from_fields(7, "s17".as_bytes(), 11..12, "TA".as_bytes());
-/// assert_eq!(graph.segment_name(7), last.name);
-/// assert_eq!(graph.segment_nodes(7), last.nodes);
-/// assert_eq!(graph.segment_sequence(7), last.sequence);
-/// assert_eq!(graph.segment_len(7), last.sequence.len());
+/// assert_eq!(sequences.segment_name(7), last.name);
+/// assert_eq!(sequences.segment_nodes(7), last.nodes);
+/// assert_eq!(sequences.segment_sequence(7), last.sequence);
+/// assert_eq!(sequences.segment_len(7), last.sequence.len());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Graph {
-    header: Header<GraphPayload>,
+pub struct Sequences {
+    header: Header<SequencesPayload>,
     sequences: StringArray,
     segments: StringArray,
     mapping: SparseVector,
@@ -91,7 +91,7 @@ pub struct Graph {
 //-----------------------------------------------------------------------------
 
 /// Sequences for nodes.
-impl Graph {
+impl Sequences {
     /// Returns the number of nodes in the original graph.
     ///
     /// This may be less than the number of sequences, if there are gaps in the node id space.
@@ -146,11 +146,11 @@ impl Graph {
 //-----------------------------------------------------------------------------
 
 /// Segments.
-impl Graph {
+impl Sequences {
     /// Returns `true` if the graph contains a node-to-segment translation.
     #[inline]
     pub fn has_translation(&self) -> bool {
-        self.header.is_set(GraphPayload::FLAG_TRANSLATION)
+        self.header.is_set(SequencesPayload::FLAG_TRANSLATION)
     }
 
     /// Returns the number of segments in the original graph.
@@ -212,7 +212,7 @@ impl Graph {
 
     /// Returns the range of node ids in the original graph corresponding to the given segment identifier.
     ///
-    /// See also [`Graph::segment_range`].
+    /// See also [`Sequences::segment_range`].
     /// Note that random access to the node-to-segment translation is somewhat slow.
     ///
     /// # Panics
@@ -227,7 +227,7 @@ impl Graph {
 
     /// Returns the range of sequences corresponding to the given segment identifier.
     ///
-    /// See also [`Graph::segment_nodes`].
+    /// See also [`Sequences::segment_nodes`].
     /// Note that random access to the node-to-segment translation is somewhat slow.
     ///
     /// # Panics
@@ -281,7 +281,7 @@ impl Graph {
 
 //-----------------------------------------------------------------------------
 
-impl Serialize for Graph {
+impl Serialize for Sequences {
     fn serialize_header<T: io::Write>(&self, writer: &mut T) -> io::Result<()> {
         self.header.serialize(writer)
     }
@@ -294,45 +294,45 @@ impl Serialize for Graph {
     }
 
     fn load<T: io::Read>(reader: &mut T) -> io::Result<Self> {
-        let mut header = Header::<GraphPayload>::load(reader)?;
+        let mut header = Header::<SequencesPayload>::load(reader)?;
         if let Err(msg) = header.validate() {
             return Err(Error::new(ErrorKind::InvalidData, msg));
         }
 
         // Decompress or deserialize the sequences.
-        let sequences = if header.version() >= GraphPayload::ZSTD_VERSION {
+        let sequences = if header.version() >= SequencesPayload::ZSTD_VERSION {
             StringArray::decompress(reader)?
         } else {
             StringArray::load(reader)?
         };
 
         let segments = StringArray::load(reader)?;
-        if header.is_set(GraphPayload::FLAG_TRANSLATION) == segments.is_empty() {
-            return Err(Error::new(ErrorKind::InvalidData, "Graph: Translation flag does not match the presence of segment names"));
+        if header.is_set(SequencesPayload::FLAG_TRANSLATION) == segments.is_empty() {
+            return Err(Error::new(ErrorKind::InvalidData, "Sequences: Translation flag does not match the presence of segment names"));
         }
 
         let mapping = SparseVector::load(reader)?;
-        if header.is_set(GraphPayload::FLAG_TRANSLATION) {
+        if header.is_set(SequencesPayload::FLAG_TRANSLATION) {
             // If there are no gaps in the node id space, `mapping.len() == header.payload().nodes + 1`.
             // Unused nodes create gaps.
             if mapping.len() <= header.payload().nodes {
-                return Err(Error::new(ErrorKind::InvalidData, "Graph: Node-to-segment mapping does not match the number of nodes"));
+                return Err(Error::new(ErrorKind::InvalidData, "Sequences: Node-to-segment mapping does not match the number of nodes"));
             }
             if mapping.len() != sequences.len() + 1 {
-                return Err(Error::new(ErrorKind::InvalidData, "Graph: Node-to-segment mapping does not match the number of sequences"));
+                return Err(Error::new(ErrorKind::InvalidData, "Sequences: Node-to-segment mapping does not match the number of sequences"));
             }
             if mapping.count_ones() != segments.len() {
-                return Err(Error::new(ErrorKind::InvalidData, "Graph: Node-to-segment mapping does not match the number of segments"));
+                return Err(Error::new(ErrorKind::InvalidData, "Sequences: Node-to-segment mapping does not match the number of segments"));
             }
         } else if !segments.is_empty() {
-            return Err(Error::new(ErrorKind::InvalidData, "Graph: Translation flag does not match the presence of node-to-segment mapping"));
+            return Err(Error::new(ErrorKind::InvalidData, "Sequences: Translation flag does not match the presence of node-to-segment mapping"));
         }
 
         // Update the header to the latest version after we have used the
         // serialized version for loading the correct data.
         header.update();
 
-        Ok(Graph {
+        Ok(Sequences {
             header, sequences, segments, mapping,
         })
     }
@@ -378,7 +378,7 @@ impl<'a> Segment<'a> {
 
 //-----------------------------------------------------------------------------
 
-/// A read-only iterator over the segments in a [`Graph`].
+/// A read-only iterator over the segments in a [`Sequences`].
 ///
 /// The type of `Item` is [`Segment`].
 /// If there are gaps in the node id space of the graph, segments corresponding to unused ids may be empty.
@@ -387,15 +387,15 @@ impl<'a> Segment<'a> {
 ///
 /// ```
 /// use gbz::Segment;
-/// use gbz::graph::Graph;
+/// use gbz::sequences::Sequences;
 /// use gbz::support;
 /// use simple_sds::serialize;
 ///
 /// let filename = support::get_test_data("translation.gg");
-/// let graph: Graph = serialize::load_from(&filename).unwrap();
+/// let sequences: Sequences = serialize::load_from(&filename).unwrap();
 ///
-/// assert!(graph.has_translation());
-/// let mut iter = graph.segment_iter();
+/// assert!(sequences.has_translation());
+/// let mut iter = sequences.segment_iter();
 /// let first = Segment::from_fields(0, "s11".as_bytes(), 1..3, "GAT".as_bytes());
 /// assert_eq!(iter.next(), Some(first));
 /// let last = Segment::from_fields(7, "s17".as_bytes(), 11..12, "TA".as_bytes());
@@ -403,7 +403,7 @@ impl<'a> Segment<'a> {
 /// ```
 #[derive(Clone, Debug)]
 pub struct SegmentIter<'a> {
-    parent: &'a Graph,
+    parent: &'a Sequences,
     // Iterator over `parent.mapping`.
     iter: OneIter<'a>,
     // The first (segment, node) identifier we have not used.

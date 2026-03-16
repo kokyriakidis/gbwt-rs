@@ -72,6 +72,7 @@ The first pre-release includes supports the GBWT Simple-SDS file format as well 
 
 * Run `cargo clippy --features=binaries`.
 * Run tests with `cargo test`.
+* Build documentation with `cargo doc`.
 * Update version in `Cargo.toml`.
 * Update `RELEASES.md`.
 * Publish in crates.io with `cargo publish`.
