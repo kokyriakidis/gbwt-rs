@@ -24,6 +24,8 @@ use std::iter::FusedIterator;
 use std::ops::Range;
 use std::io;
 
+pub mod builder;
+
 #[cfg(test)]
 mod tests;
 

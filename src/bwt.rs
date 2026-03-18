@@ -60,6 +60,11 @@ mod tests;
 //-----------------------------------------------------------------------------
 
 /// A GBWT position as a (node, offset) pair.
+///
+/// The offset is typically one of the following:
+///
+/// * The offset of the first sequence coming from the source node in the destination node.
+/// * The total number of times this edge is used by the sequences.
 #[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pos {
     /// GBWT node identifier.
