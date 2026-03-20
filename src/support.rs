@@ -112,6 +112,8 @@ pub fn reverse_complement(sequence: &[u8]) -> Vec<u8> {
 //-----------------------------------------------------------------------------
 
 /// A run as a (value, length) pair.
+///
+/// See [`SmallRun`] for a more compact version.
 #[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Run {
     /// Value in the run.
@@ -134,6 +136,47 @@ impl From<(usize, usize)> for Run {
     #[inline]
     fn from(run: (usize, usize)) -> Self {
         Self::new(run.0, run.1)
+    }
+}
+
+/// A [`Run`] encoded using 32-bit integers to save space.
+///
+/// This is intended for situations, where we store a large number of runs explicitly.
+/// The C++ implementation also uses 32-bit integers in similar situations.
+#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SmallRun {
+    // Value in the run.
+    pub value: u32,
+    // Length of the run.
+    pub len: u32,
+}
+
+impl SmallRun {
+    /// Creates a new run.
+    pub fn new(value: usize, len: usize) -> Self {
+        SmallRun {
+            value: value as u32,
+            len: len as u32,
+
+        }
+    }
+}
+
+impl From<(usize, usize)> for SmallRun {
+    fn from(run: (usize, usize)) -> Self {
+        Self::new(run.0, run.1)
+    }
+}
+
+impl From<SmallRun> for Run {
+    fn from(run: SmallRun) -> Self {
+        Run::new(run.value as usize, run.len as usize)
+    }
+}
+
+impl From<Run> for SmallRun {
+    fn from(run: Run) -> Self {
+        Self::new(run.value, run.len)
     }
 }
 

@@ -65,6 +65,8 @@ mod tests;
 ///
 /// * The offset of the first sequence coming from the source node in the destination node.
 /// * The total number of times this edge is used by the sequences.
+///
+/// See [`SmallPos`] for a more compact version.
 #[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pos {
     /// GBWT node identifier.
@@ -87,6 +89,46 @@ impl From<(usize, usize)> for Pos {
     #[inline]
     fn from(pos: (usize, usize)) -> Self {
         Self::new(pos.0, pos.1)
+    }
+}
+
+/// A [`Pos`] encoded using 32-bit integers to save space.
+///
+/// This is intended for situations, where we store a large number of edges explicitly.
+/// The C++ implementation also uses 32-bit integers in similar situations.
+#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SmallPos {
+    /// GBWT node identifier.
+    pub node: u32,
+    /// BWT offset within the node.
+    pub offset: u32,
+}
+
+impl SmallPos {
+    /// Creates a new position.
+    pub fn new(node: usize, offset: usize) -> Self {
+        SmallPos {
+            node: node as u32,
+            offset: offset as u32,
+        }
+    }
+}
+
+impl From<(usize, usize)> for SmallPos {
+    fn from(pos: (usize, usize)) -> Self {
+        Self::new(pos.0, pos.1)
+    }
+}
+
+impl From<SmallPos> for Pos {
+    fn from(pos: SmallPos) -> Self {
+        Pos::new(pos.node as usize, pos.offset as usize)
+    }
+}
+
+impl From<Pos> for SmallPos {
+    fn from(pos: Pos) -> Self {
+        Self::new(pos.node, pos.offset)
     }
 }
 
