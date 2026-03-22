@@ -2,6 +2,7 @@
 //!
 //! Like the C++ implementation, the construction algorithm uses 32-bit integers internally to save space.
 //! This limits the maximum node identifier and the number of visits to a node to approximately [`u32::MAX`].
+//! The interface uses [`usize`], as it is the semantically correct type and also used in the rest of the codebase.
 // FIXME: document
 
 use crate::ENDMARKER;
@@ -231,7 +232,7 @@ impl FusedIterator for EdgeListIter<'_> {}
 
 //-----------------------------------------------------------------------------
 
-// FIXME: examples, tests
+// FIXME: tests
 /// A mutable node record corresponding to [`crate::bwt::Record`] used for GBWT construction.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MutableRecord {
@@ -336,11 +337,11 @@ impl RunBuilder {
 
     // Inserts a source run until the given offset, and returns the remaining run.
     fn insert_source_run(&mut self, source: SmallRun, offset: usize) -> SmallRun {
-        let (to_insert, to_return) = if offset >= self.source_len + source.len as usize {
+        let (to_insert, to_return) = if offset >= self.target_len + source.len as usize {
             (source, SmallRun::default())
         } else {
-            let to_insert = SmallRun::new(source.value as usize, offset - self.source_len);
-            let to_return = SmallRun::new(source.value as usize, self.source_len + source.len as usize - offset);
+            let to_insert = SmallRun::new(source.value as usize, offset - self.target_len);
+            let to_return = SmallRun::new(source.value as usize, self.target_len + source.len as usize - offset);
             (to_insert, to_return)
         };
         if let Some(last) = self.runs.last_mut() && last.value == to_insert.value {
@@ -363,6 +364,11 @@ impl RunBuilder {
         }
         self.target_len += 1;
         self.ranks.increment(value, 1);
+    }
+
+    // Returns the rank of the given value at the current target length.
+    fn rank(&self, value: usize) -> u32 {
+        self.ranks.get(value).unwrap_or(0)
     }
 }
 
@@ -498,12 +504,9 @@ impl MutableGBWT {
 
     // Inserts `next.node` to record offset `curr.offset` for node `curr.node` in the GBWT.
     // Sets `next.offset` to the rank of `next.node` at `curr.offset`.
-    // Ensures that the outgoing edge and the successor record exist.
-    // Increments the number of visits from `curr.node` in the successor record.
-    fn update_records(&mut self, sequences: &mut [Sequence]) {
+    fn update_bwts(&mut self, sequences: &mut [Sequence]) {
         // Update the BWT fragments.
         let mut i = 0;
-        let mut edges: Vec<(u32, u32)> = Vec::with_capacity(sequences.len());
         while i < sequences.len() {
             let curr = sequences[i].curr.node;
             let current = self.records.get_mut(&(curr as usize)).unwrap();
@@ -512,15 +515,15 @@ impl MutableGBWT {
             let mut new_bwt = RunBuilder::new();
             while i < sequences.len() && sequences[i].curr.node == curr {
                 let seq = &mut sequences[i];
-                edges.push((seq.curr.node, seq.next.node));
                 while new_bwt.target_len < seq.curr.offset as usize {
                     if remaining.len == 0 {
-                        remaining = run_iter.next().unwrap(); // FIXME: error handling?
+                        remaining = run_iter.next()
+                            .expect("MutableGBWT: Existing runs should reach the inserted position");
                     }
                     remaining = new_bwt.insert_source_run(remaining, seq.curr.offset as usize);
                 }
                 // We need to get the rank before inserting the new value.
-                seq.next.offset = new_bwt.ranks.get(seq.next.node as usize).unwrap_or(0);
+                seq.next.offset = new_bwt.rank(seq.next.node as usize);
                 new_bwt.insert_target_value(seq.next.node as usize);
                 i += 1;
             }
@@ -532,11 +535,20 @@ impl MutableGBWT {
             }
             current.bwt = new_bwt.runs;
         }
+    }
+
+    // Adds the records and edges implied by the active sequences, if necessary.
+    // Also increments the number of visits from `curr.node` in the record for `next.node`.
+    fn add_records_and_edges(&mut self, sequences: &[Sequence]) {
+        let mut node_pairs: Vec<(u32, u32)> = Vec::with_capacity(sequences.len());
+        for sequence in sequences.iter() {
+            node_pairs.push((sequence.curr.node, sequence.next.node));
+        }
 
         // Ensure that the outgoing edges exist.
-        edges.sort_unstable();
-        for (i, &(from, to)) in edges.iter().enumerate() {
-            if i > 0 && edges[i - 1].0 == from {
+        node_pairs.sort_unstable();
+        for (i, &(from, to)) in node_pairs.iter().enumerate() {
+            if i > 0 && node_pairs[i - 1].0 == from {
                 continue;
             }
             let predecessor = self.records.get_mut(&(from as usize)).unwrap();
@@ -544,10 +556,10 @@ impl MutableGBWT {
         }
 
         // Ensure that the successor records exist and increment the visits.
-        edges.sort_unstable_by_key(|&(_, to)| to);
+        node_pairs.sort_unstable_by_key(|&(_, to)| to);
         let mut start = 0;
-        for (i, &(from, to)) in edges.iter().enumerate() {
-            if i + 1 >= edges.len() || edges[i + 1].1 != to {
+        for (i, &(from, to)) in node_pairs.iter().enumerate() {
+            if i + 1 >= node_pairs.len() || node_pairs[i + 1].1 != to {
                 if to != ENDMARKER as u32 {
                     let successor = self.records.entry(to as usize).or_default();
                     successor.add_visits(from as usize, i - start + 1);
@@ -643,7 +655,8 @@ impl MutableGBWT {
         // * If `nodes[offset]` exists, incoming edges for `next.node` already include the visit from `curr.node`.
         let mut offset = 0;
         while !active_sequences.is_empty() {
-            self.update_records(active_sequences);
+            self.update_bwts(active_sequences);
+            self.add_records_and_edges(active_sequences);
             offset += 1;
             active_sequences = self.sort_sequences(active_sequences);
             self.determine_offsets(active_sequences);
@@ -667,6 +680,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<MutableRecord>(), 96, "MutableRecord should be 96 bytes");
         assert_eq!(std::mem::size_of::<Sequence>(), 32, "Sequence should be 32 bytes");
     }
+
+//-----------------------------------------------------------------------------
 
     #[test]
     fn edge_list_empty() {
@@ -756,6 +771,162 @@ mod tests {
         truth.sort();
         check_edge_list(&edges, &truth);
     }
+
+//-----------------------------------------------------------------------------
+
+    fn expand_runs(runs: &[SmallRun]) -> Vec<u32> {
+        let mut result = Vec::new();
+        for run in runs.iter() {
+            result.extend(std::iter::repeat(run.value).take(run.len as usize));
+        }
+        result
+    }
+
+    // Target positions are (offset, value, expected rank).
+    fn check_run_builder(source: &[SmallRun], target: &[(usize, usize, usize)]) {
+        // Build the target runs.
+        let mut builder = RunBuilder::new();
+        let mut source_offset = 0;
+        let mut remaining = SmallRun::default();
+        for &(offset, value, rank) in target.iter() {
+            while builder.target_len < offset {
+                if remaining.len == 0 {
+                    remaining = source[source_offset];
+                    source_offset += 1;
+                }
+                remaining = builder.insert_source_run(remaining, offset);
+            }
+            assert_eq!(builder.rank(value), rank as u32, "Rank of value {} at offset {} should be {}", value, offset, rank);
+            builder.insert_target_value(value);
+        }
+        if remaining.len > 0 {
+            builder.insert_source_run(remaining, usize::MAX);
+        }
+        while source_offset < source.len() {
+            builder.insert_source_run(source[source_offset], usize::MAX);
+            source_offset += 1;
+        }
+
+        // Now determine the truth.
+        let expanded_source = expand_runs(source);
+        let mut truth = Vec::new();
+        let mut source_offset = 0;
+        let mut target_offset = 0;
+        for &(offset, value, _) in target.iter() {
+            while target_offset < offset {
+                truth.push(expanded_source[source_offset]);
+                source_offset += 1;
+                target_offset += 1;
+            }
+            truth.push(value as u32);
+            target_offset += 1;
+        }
+        while source_offset < expanded_source.len() {
+            truth.push(expanded_source[source_offset]);
+            source_offset += 1;
+        }
+
+        // Check the number of maximal runs.
+        let mut prev = None;
+        let mut runs = 0;
+        for i in 0..truth.len() {
+            if Some(truth[i]) != prev {
+                prev = Some(truth[i]);
+                runs += 1;
+            }
+        }
+        assert_eq!(builder.runs.len(), runs, "Builder should have {} runs", runs);
+
+        // Check the actual runs.
+        let expanded_runs = expand_runs(&builder.runs);
+        assert_eq!(expanded_runs.len(), truth.len(), "Expanded runs should have total length {}", truth.len());
+        for i in 0..truth.len() {
+            assert_eq!(expanded_runs[i], truth[i], "Expanded runs should match truth at offset {}", i);
+        }
+    }
+
+    #[test]
+    fn run_builder_empty() {
+        let builder = RunBuilder::new();
+        assert_eq!(builder.source_len, 0, "Run builder should start with source length 0");
+        assert_eq!(builder.target_len, 0, "Run builder should start with target length 0");
+        assert!(builder.runs.is_empty(), "Run builder should start with empty runs");
+        assert!(builder.ranks.is_empty(), "Run builder should start with no ranks");
+    }
+
+    #[test]
+    fn run_builder_insert_to_empty() {
+        let source = Vec::new();
+        let target = vec![
+            (0, 1, 0),
+            (1, 2, 0),
+            (2, 1, 1),
+            (3, 3, 0),
+        ];
+        check_run_builder(&source, &target);
+    }
+
+    #[test]
+    fn run_builder_merge_runs() {
+        let source = vec![
+            SmallRun::new(1, 2),
+            SmallRun::new(2, 3),
+            SmallRun::new(2, 2),
+            SmallRun::new(3, 1),
+        ];
+        let target = Vec::new();
+        check_run_builder(&source, &target);
+    }
+
+    #[test]
+    fn run_builder_insert_middle() {
+        let source = vec![
+            SmallRun::new(1, 4),
+            SmallRun::new(2, 3),
+            SmallRun::new(3, 4),
+        ];
+        let target = vec![
+            (2, 1, 2), // Same value in the middle.
+            (6, 1, 5), // Different value in the middle.
+        ];
+        check_run_builder(&source, &target);
+    }
+
+    #[test]
+    fn run_builder_insert_same_ends() {
+        let source = vec![
+            SmallRun::new(1, 4),
+            SmallRun::new(2, 3),
+            SmallRun::new(3, 4),
+        ];
+        let target = vec![
+            (0, 1, 0),  // Start of vector and run.
+            (5, 1, 5),  // End of run.
+            (9, 3, 0),  // Start of run.
+            (14, 3, 5), // End of vector and run.
+        ];
+        check_run_builder(&source, &target);
+    }
+
+    #[test]
+    fn run_builder_insert_different_ends() {
+        let source = vec![
+            SmallRun::new(1, 4),
+            SmallRun::new(2, 3),
+            SmallRun::new(3, 4),
+        ];
+        let target = vec![
+            (0, 3, 0),  // Start of vector and run.
+            (5, 3, 1),  // End of run.
+            (9, 1, 4),  // Start of run.
+            (14, 1, 5), // End of vector and run.
+        ];
+        check_run_builder(&source, &target);
+    }
+
+//-----------------------------------------------------------------------------
+
+    // FIXME: tests for MutableGBWT
 }
 
 //-----------------------------------------------------------------------------
