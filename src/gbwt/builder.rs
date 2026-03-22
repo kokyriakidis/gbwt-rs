@@ -232,7 +232,6 @@ impl FusedIterator for EdgeListIter<'_> {}
 
 //-----------------------------------------------------------------------------
 
-// FIXME: tests
 /// A mutable node record corresponding to [`crate::bwt::Record`] used for GBWT construction.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MutableRecord {
@@ -290,6 +289,27 @@ impl MutableRecord {
         if let Some(edge_offset) = self.outgoing.get_mut(to) {
             *edge_offset = offset as u32;
         }
+    }
+
+    /// Computes LF-mapping at the given offset.
+    ///
+    /// Returns the GBWT position the path at the given offset continues to, or [`None`] if the offset is out of bounds.
+    pub fn follow_path(&self, offset: usize) -> Option<Pos> {
+        if offset >= self.len {
+            return None;
+        }
+        let mut bwt_offset = 0;
+        let mut ranks = self.outgoing.clone();
+        for run in self.bwt.iter() {
+            bwt_offset += run.len as usize;
+            ranks.increment(run.value as usize, run.len as usize);
+            if bwt_offset > offset {
+                let rank = ranks.get(run.value as usize).unwrap_or(0) as usize;
+                let rank = rank - (bwt_offset - offset);
+                return Some(Pos::new(run.value as usize, rank));
+            }
+        }
+        None // This should be unreachable.
     }
 }
 
@@ -431,6 +451,25 @@ impl MutableGBWT {
     /// Returns the total number of sequences.
     pub fn sequence_count(&self) -> usize {
         self.endmarker.len()
+    }
+
+    /// Returns the given sequence, or [`None`] if the index is out of bounds.
+    ///
+    /// This is mostly intended for testing.
+    pub fn extract(&self, sequence_id: usize) -> Option<Vec<u32>> {
+        if sequence_id >= self.endmarker.len() {
+            return None;
+        }
+
+        let mut result = Vec::new();
+        let mut pos = Pos::from(self.endmarker[sequence_id]);
+        while pos.node != ENDMARKER {
+            result.push(pos.node as u32);
+            let record = self.records.get(&(pos.node as usize))?;
+            pos = record.follow_path(pos.offset)?;
+        }
+
+        Some(result)
     }
 }
 
@@ -926,7 +965,55 @@ mod tests {
 
 //-----------------------------------------------------------------------------
 
+    #[test]
+    fn mutable_record_empty() {
+        let record = MutableRecord::new();
+        assert_eq!(record.len(), 0, "Mutable record should start with length 0");
+        assert!(record.empty(), "Mutable record should be empty");
+        assert!(record.incoming.is_empty(), "Mutable record should start with no incoming edges");
+        assert!(record.outgoing.is_empty(), "Mutable record should start with no outgoing edges");
+        assert!(record.bwt.is_empty(), "Mutable record should start with empty BWT fragment");
+        assert!(record.follow_path(0).is_none(), "Following path in an empty record should return None");
+    }
+
+    #[test]
+    fn mutable_record_follow_path() {
+        // We do not need incoming edges.
+        let mut record = MutableRecord::new();
+        record.add_edge(1);
+        record.set_edge_offset(1, 10);
+        record.add_edge(2);
+        record.set_edge_offset(2, 20);
+        record.add_edge(3);
+        record.set_edge_offset(3, 30);
+        record.bwt.push(SmallRun::new(1, 3));
+        record.bwt.push(SmallRun::new(3, 4));
+        record.bwt.push(SmallRun::new(2, 2));
+        record.bwt.push(SmallRun::new(1, 1));
+        record.len = 10;
+
+        let expanded_runs = expand_runs(&record.bwt);
+        for offset in 0..record.len() {
+            let expected_rank = expanded_runs.iter().take(offset).filter(|&&value| value == expanded_runs[offset]).count();
+            let expected_offset = expected_rank + 10 * expanded_runs[offset] as usize;
+            let expected_pos = Pos::new(expanded_runs[offset] as usize, expected_offset);
+            assert_eq!(
+                record.follow_path(offset), Some(expected_pos),
+                "Following path at offset {} should return ({}, {})", offset, expected_pos.node, expected_pos.offset
+            );
+        }
+        assert!(record.follow_path(record.len).is_none(), "Following path at offset equal to length should return None");
+    }
+
+//-----------------------------------------------------------------------------
+
     // FIXME: tests for MutableGBWT
+
+    // empty
+
+    // { 1, 2 } batches x { with, without } metadata x { unidirectional, bidirectional }
+
+    // validate by checking flags, statistics and extracting paths, names
 }
 
 //-----------------------------------------------------------------------------
