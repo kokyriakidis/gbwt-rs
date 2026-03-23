@@ -3,7 +3,14 @@
 //! Like the C++ implementation, the construction algorithm uses 32-bit integers internally to save space.
 //! This limits the maximum node identifier and the number of visits to a node to approximately [`u32::MAX`].
 //! The interface uses [`usize`], as it is the semantically correct type and also used in the rest of the codebase.
-// FIXME: document
+//!
+//! The construction algorithm is based on the BCR algorithm:
+//!
+//! > Markus J. Bauer, Anthony J. Cox, and Giovanna Rosone:\
+//! > **Lightweight algorithms for constructing and inverting the BWT of string collections**.\
+//! > Theoretical Computer Science 483:134–148, 2013.
+//! > DOI: [10.1016/j.tcs.2012.02.002](https://doi.org/10.1016/j.tcs.2012.02.002)
+// FIXME: refer to GBWTBuilder, MutableGBWT
 
 use crate::ENDMARKER;
 use crate::{Pos, FullPathName};
@@ -17,11 +24,11 @@ use std::iter::FusedIterator;
 
 // FIXME: builder itself
 // Construction has three parameters: bidirectional, metadata, buffer size
-// There is a background thread that contains a DynamicGBWT and a MetadataBuilder
+// There is a background thread that contains a MutableGBWT
 // When the buffer gets full, the main thread sends the paths (and the metadata) to the background thread
 // When the construction is finished, the main thread sends the remaining buffer, followed by an empty buffer to signal the end of construction
-// The background thread inserts each batch into the DynamicGBWT and the MetadataBuilder
-// When it receives the end signal, it converts the DynamicGBWT and MetadataBuilder into GBWT and sends it back
+// The background thread inserts each batch into the MutableGBWT
+// When it receives the end signal, it converts the MutableGBWT into GBWT and sends it back
 // Communication between threads uses channels
 
 //-----------------------------------------------------------------------------
@@ -123,13 +130,13 @@ impl EdgeList {
                     map.insert(node as u32, amount as u32);
                     *self = EdgeList::Large(map);
                 }
-                return 0;
+                0
             }
             EdgeList::Large(map) => {
                 let entry = map.entry(node as u32).or_insert(0);
                 let val = *entry;
                 *entry += amount as u32;
-                return val;
+                val
             }
         }
     }
@@ -257,7 +264,7 @@ impl MutableRecord {
     }
 
     /// Returns `true` if the record is empty (this should not happen).
-    pub fn empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
@@ -331,7 +338,7 @@ struct Sequence<'a> {
 
 impl<'a> PartialOrd for Sequence<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some((self.next.node, self.curr).cmp(&(other.next.node, other.curr)))
+        Some(self.cmp(other))
     }
 }
 
@@ -394,7 +401,17 @@ impl RunBuilder {
 
 //-----------------------------------------------------------------------------
 
-// FIXME: implement, document, tests, examples
+// FIXME: tests, examples
+// FIXME: impl From<MutableGBWT> for GBWT (and the other way around?)
+/// A data structure for building [`crate::GBWT`] indexes.
+///
+/// An empty index can be created with [`Self::new`].
+/// Each [`Self::insert`] inserts a batch of sequences.
+/// If the sequences are short and/or similar, inserting large batches can be much more efficient:
+///
+/// * Each step extends each sequence in the batch by one node.
+///   If multiple sequences visit the same node in the same step, the node record is updated only once.
+/// * If all sequences traverse the same part of the graph, the algorithm may benefit from memory locality.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MutableGBWT {
     // Total length of the sequences, including endmarkers.
@@ -453,6 +470,15 @@ impl MutableGBWT {
         self.endmarker.len()
     }
 
+    /// Returns the total number of paths.
+    pub fn path_count(&self) -> usize {
+        if self.bidirectional {
+            self.endmarker.len() / 2
+        } else {
+            self.endmarker.len()
+        }
+    }
+
     /// Returns the given sequence, or [`None`] if the index is out of bounds.
     ///
     /// This is mostly intended for testing.
@@ -465,17 +491,33 @@ impl MutableGBWT {
         let mut pos = Pos::from(self.endmarker[sequence_id]);
         while pos.node != ENDMARKER {
             result.push(pos.node as u32);
-            let record = self.records.get(&(pos.node as usize))?;
+            let record = self.records.get(&pos.node)?;
             pos = record.follow_path(pos.offset)?;
         }
 
         Some(result)
+    }
+
+    /// Returns the name of the given path, or [`None`] if the index does not have metadata or the path id is out of bounds.
+    ///
+    /// This is mostly intended for testing.
+    pub fn path_name(&self, path_id: usize) -> Option<&FullPathName> {
+        self.metadata.as_ref()?.get(path_id)
     }
 }
 
 /// Construction.
 impl MutableGBWT {
     /// Creates an empty GBWT.
+    ///
+    /// If `bidirectional` is `true`, the GBWT will be bidirectional.
+    /// Each [`Self::insert`] call must then consist of an even number of sequences.
+    /// The sequences at odd indices are assumed to be the reverse complements of the sequences at the preceding even indices.
+    ///
+    /// If `with_metadata` is `true`, the GBWT will have path metadata.
+    /// Each [`Self::insert`] call must then be accompanied by path names for the inserted sequences, one per path.
+    /// If the GBWT is bidirectional, each name corresponds to a pair of sequences.
+    /// Otherwise each sequence is a separate path.
     pub fn new(bidirectional: bool, with_metadata: bool) -> Self {
         Self {
             len: 0,
@@ -504,7 +546,7 @@ impl MutableGBWT {
         if start < buffer.len() {
             return Err(String::from("MutableGBWT: Trailing nodes in the buffer"));
         }
-        if self.bidirectional && sequences.len() % 2 != 0 {
+        if self.bidirectional && !sequences.len().is_multiple_of(2) {
             return Err(String::from("MutableGBWT: Odd number of sequences in the buffer for a bidirectional GBWT"));
         }
         Ok(sequences)
@@ -531,7 +573,7 @@ impl MutableGBWT {
     fn append_sequence_starts(&mut self, sequences: &mut [Sequence]) {
         for sequence in sequences.iter_mut() {
             let start = sequence.nodes.first().copied().unwrap_or(ENDMARKER as u32) as usize;
-            let offset = self.endmarker_edges.increment(start as usize, 1) as usize;
+            let offset = self.endmarker_edges.increment(start, 1) as usize;
             let pos = SmallPos::new(start, offset);
             sequence.curr = pos;
             self.endmarker.push(pos);
@@ -569,7 +611,7 @@ impl MutableGBWT {
             if remaining.len > 0 {
                 new_bwt.insert_source_run(remaining, usize::MAX);
             }
-            while let Some(run) = run_iter.next() {
+            for run in run_iter {
                 new_bwt.insert_source_run(run, usize::MAX);
             }
             current.bwt = new_bwt.runs;
@@ -634,7 +676,7 @@ impl MutableGBWT {
             for edge in incoming {
                 if edge.node == ENDMARKER {
                     // The offset is always 0 in an outgoing edge from the endmarker.
-                    offset += self.endmarker_edges.get(edge.node as usize).unwrap_or(0) as usize;
+                    offset += self.endmarker_edges.get(edge.node).unwrap_or(0) as usize;
                 } else {
                     let predecessor = self.records.get_mut(&(edge.node)).unwrap();
                     predecessor.set_edge_offset(next as usize, offset);
@@ -669,6 +711,8 @@ impl MutableGBWT {
     ///
     /// If the GBWT contains metadata, path names must be provided.
     /// Each name corresponds to a sequence (in unidirectional GBWT) or a pair of sequences (in bidirectional GBWT).
+    ///
+    /// The newly inserted sequences receive sequence and path identifiers starting from [`Self::sequence_count()`] and [`Self::path_count()`], respectively.
     ///
     /// # Errors
     ///
@@ -969,7 +1013,7 @@ mod tests {
     fn mutable_record_empty() {
         let record = MutableRecord::new();
         assert_eq!(record.len(), 0, "Mutable record should start with length 0");
-        assert!(record.empty(), "Mutable record should be empty");
+        assert!(record.is_empty(), "Mutable record should be empty");
         assert!(record.incoming.is_empty(), "Mutable record should start with no incoming edges");
         assert!(record.outgoing.is_empty(), "Mutable record should start with no outgoing edges");
         assert!(record.bwt.is_empty(), "Mutable record should start with empty BWT fragment");

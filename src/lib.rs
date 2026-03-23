@@ -11,6 +11,13 @@
 //! Bioinformatics 36(2):400-407, 2020.
 //! DOI: [10.1093/bioinformatics/btz575](https://doi.org/10.1093/bioinformatics/btz575)
 //!
+//! ### GBWT construction
+//!
+//! Markus J. Bauer, Anthony J. Cox, and Giovanna Rosone:\
+//! **Lightweight algorithms for constructing and inverting the BWT of string collections**.\
+//! Theoretical Computer Science 483:134–148, 2013.
+//! DOI: [10.1016/j.tcs.2012.02.002](https://doi.org/10.1016/j.tcs.2012.02.002)
+//!
 //! ### GBWTGraph
 //!
 //! Jouni Sirén, Jean Monlong, Xian Chang, Adam M. Novak, Jordan M. Eizenga, Charles Markello, Jonas A. Sibbesen, Glenn Hickey, Pi-Chuan Chang, Andrew Carroll, Namrata Gupta, Stacey Gabriel, Thomas W. Blackwell, Aakrosh Ratan, Kent D. Taylor, Stephen S. Rich, Jerome I. Rotter, David Haussler, Erik Garrison, and Benedict Paten:\
