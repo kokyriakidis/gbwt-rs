@@ -6,10 +6,23 @@ use std::collections::HashSet;
 
 //-----------------------------------------------------------------------------
 
-// GBWT example from the paper: (edges, runs, invalid_node)
-fn get_edges_runs() -> (Vec<Vec<Pos>>, Vec<Vec<Run>>, usize) {
+fn get_edge_lists(edges: Vec<Vec<Pos>>) -> Vec<EdgeList> {
+    edges.iter().map(|record_edges| {
+        let mut edge_list = EdgeList::new();
+        for edge in record_edges {
+            edge_list.increment(edge.node, edge.offset);
+        }
+        edge_list
+    }).collect()
+}
+
+// GBWT example from the paper: (endmarker edges, endmarker, edges, runs, invalid_node)
+fn get_edges_runs() -> (EdgeList, Vec<Pos>, Vec<EdgeList>, Vec<Vec<Run>>, usize) {
+    let mut endmarker_edges = EdgeList::new();
+    endmarker_edges.increment(1, 0);
+    let endmarker = vec![Pos::new(1, 0), Pos::new(1, 1), Pos::new(1, 2)];
+
     let edges = vec![
-        vec![Pos::new(1, 0)],
         vec![Pos::new(2, 0), Pos::new(3, 0)],
         vec![Pos::new(4, 0), Pos::new(5, 0)],
         vec![Pos::new(4, 1)],
@@ -18,24 +31,32 @@ fn get_edges_runs() -> (Vec<Vec<Pos>>, Vec<Vec<Run>>, usize) {
         vec![Pos::new(7, 2)],
         vec![Pos::new(0, 0)],
     ];
+    let edges = get_edge_lists(edges);
+
     let runs = vec![
-        vec![Run::new(0, 3)],
-        vec![Run::new(0, 2), Run::new(1, 1)],
-        vec![Run::new(0, 1), Run::new(1, 1)],
-        vec![Run::new(0, 1)],
-        vec![Run::new(1, 1), Run::new(0, 1)],
-        vec![Run::new(0, 2)],
-        vec![Run::new(0, 1)],
+        vec![Run::new(2, 2), Run::new(3, 1)],
+        vec![Run::new(4, 1), Run::new(5, 1)],
+        vec![Run::new(4, 1)],
+        vec![Run::new(5, 1), Run::new(6, 1)],
+        vec![Run::new(7, 2)],
+        vec![Run::new(7, 1)],
         vec![Run::new(0, 3)],
     ];
-    (edges, runs, 8)
+
+    (endmarker_edges, endmarker, edges, runs, 8)
 }
 
-// Bidirectional version of the example: (edges, runs, invalid_node)
-fn get_bidirectional() -> (Vec<Vec<Pos>>, Vec<Vec<Run>>, usize) {
+// Bidirectional version of the example.
+fn get_bidirectional() -> (EdgeList, Vec<Pos>, Vec<EdgeList>, Vec<Vec<Run>>, usize) {
+    let mut endmarker_edges = EdgeList::new();
+    endmarker_edges.increment(2, 0);
+    endmarker_edges.increment(15, 0);
+    let endmarker = vec![
+        Pos::new(2, 0), Pos::new(2, 1), Pos::new(2, 2),
+        Pos::new(15, 0), Pos::new(15, 1), Pos::new(15, 2),
+    ];
+
     let edges = vec![
-        // ENDMARKER
-        vec![Pos::new(2, 0), Pos::new(15, 0)],
         // 1
         vec![Pos::new(4, 0), Pos::new(6, 0)],
         vec![Pos::new(0, 0)],
@@ -58,65 +79,69 @@ fn get_bidirectional() -> (Vec<Vec<Pos>>, Vec<Vec<Run>>, usize) {
         vec![Pos::new(0, 0)],
         vec![Pos::new(11, 0), Pos::new(13, 0)],
     ];
+    let edges = get_edge_lists(edges);
+
     let runs = vec![
-        // ENDMARKER
-        vec![Run::new(0, 3), Run::new(1, 3)],
         // 1
-        vec![Run::new(0, 2), Run::new(1, 1)],
+        vec![Run::new(4, 2), Run::new(6, 1)],
         vec![Run::new(0, 3)],
         // 2
-        vec![Run::new(0, 1), Run::new(1, 1)],
-        vec![Run::new(0, 2)],
+        vec![Run::new(8, 1), Run::new(10, 1)],
+        vec![Run::new(3, 2)],
         // 3
-        vec![Run::new(0, 1)],
-        vec![Run::new(0, 1)],
+        vec![Run::new(8, 1)],
+        vec![Run::new(3, 1)],
         // 4
-        vec![Run::new(1, 1), Run::new(0, 1)],
-        vec![Run::new(1, 1), Run::new(0, 1)],
+        vec![Run::new(10, 1), Run::new(12, 1)],
+        vec![Run::new(5, 1), Run::new(7, 1)],
         // 5
-        vec![Run::new(0, 2)],
-        vec![Run::new(0, 1), Run::new(1, 1)],
+        vec![Run::new(14, 2)],
+        vec![Run::new(5, 1), Run::new(9, 1)],
         // 6
-        vec![Run::new(0, 1)],
-        vec![Run::new(0, 1)],
+        vec![Run::new(14, 1)],
+        vec![Run::new(9, 1)],
         // 7
         vec![Run::new(0, 3)],
-        vec![Run::new(1, 1), Run::new(0, 2)],
+        vec![Run::new(11, 1), Run::new(13, 2)],
     ];
-    (edges, runs, 16)
+
+    (endmarker_edges, endmarker, edges, runs, 16)
 }
 
-fn create_bwt(edges: &[Vec<Pos>], runs: &[Vec<Run>]) -> BWT {
-    let mut builder = BWTBuilder::new();
-    assert_eq!(builder.len(), 0, "Newly created builder has non-zero length");
-    assert!(builder.is_empty(), "Newly created builder is not empty");
+fn create_bwt(endmarker_edges: &EdgeList, endmarker: &[Pos], edges: &[EdgeList], runs: &[Vec<Run>]) -> BWT {
+    let mut expected_records = if endmarker.is_empty() { 0 } else { 1 };
+    let mut builder = BWTBuilder::new(endmarker_edges, endmarker);
+    assert_eq!(builder.len(), expected_records, "Wrong number of records in a new builder");
+    assert_eq!(builder.is_empty(), endmarker.is_empty(), "Builder should be empty iff the endmarker is empty");
 
     for i in 0..edges.len() {
-        builder.append(&edges[i], &runs[i]);
+        builder.append(&edges[i], runs[i].iter().copied());
+        expected_records += 1;
     }
-    assert_eq!(builder.len(), edges.len(), "Invalid number of records in the builder");
-    assert_eq!(builder.is_empty(), edges.is_empty(), "Invalid builder emptiness");
+    assert_eq!(builder.len(), expected_records, "Wrong number of records in the builder");
+    assert_eq!(builder.is_empty(), endmarker.is_empty(), "Builder should be empty after construction iff the endmarker is empty");
 
     BWT::from(builder)
 }
 
 // Check records in the BWT, using the provided edges as the source of truth.
 // Also checks that `id()` works correctly.
-fn check_records(bwt: &BWT, edges: &[Vec<Pos>]) {
-    assert_eq!(bwt.len(), edges.len(), "Invalid number of records in the BWT");
-    assert_eq!(bwt.is_empty(), edges.is_empty(), "Invalid BWT emptiness");
+fn check_records(bwt: &BWT, endmarker_edges: &EdgeList, edges: &[EdgeList]) {
+    let expected_records = edges.len() + if endmarker_edges.is_empty() { 0 } else { 1 };
+    assert_eq!(bwt.len(), expected_records, "Invalid number of records in the BWT");
+    assert_eq!(bwt.is_empty(), expected_records == 0, "Invalid BWT emptiness");
 
     // Edges.
     for i in 0..bwt.len() {
         let record = bwt.record(i);
-        let curr_edges = &edges[i];
+        let curr_edges = if i == 0 { endmarker_edges } else { &edges[i - 1] };
         assert_eq!(record.is_none(), curr_edges.is_empty(), "Invalid record {} existence", i);
         if let Some(record) = record {
             assert_eq!(record.id(), i, "Invalid id for record {}", i);
             assert_eq!(record.outdegree(), curr_edges.len(), "Invalid outdegree in record {}", i);
-            for j in 0..record.outdegree() {
-                assert_eq!(record.successor(j), curr_edges[j].node, "Invalid successor {} in record {}", j, i);
-                assert_eq!(record.offset(j), curr_edges[j].offset, "Invalid offset {} in record {}", j, i);
+            for (j, edge) in curr_edges.iter().enumerate() {
+                assert_eq!(record.successor(j), edge.node, "Invalid successor {} in record {}", j, i);
+                assert_eq!(record.offset(j), edge.offset, "Invalid offset {} in record {}", j, i);
             }
         }
 
@@ -128,7 +153,7 @@ fn check_records(bwt: &BWT, edges: &[Vec<Pos>]) {
             assert!(decompressed.is_some(), "Could not decompress edges for record {}", i);
             let (edges, offset) = decompressed.unwrap();
             assert_eq!(offset, edge_bytes.len(), "Invalid offset after edge list for record {}", i);
-            assert_eq!(&edges, curr_edges, "Invalid edges in compressed record {}", i);
+            assert!(edges.iter().copied().eq(curr_edges.iter()), "Invalid edges in compressed record {}", i);
             let record = bwt.record(i).unwrap();
             assert_eq!(bwt_bytes, record.bwt, "Invalid BWT in compressed record {}", i);
         }
@@ -156,25 +181,30 @@ fn check_iter(bwt: &BWT) {
 // Check all `lf()` results in the BWT, using the provided edges and runs as the source of truth.
 // Then check that decompressing the record works correctly.
 // Also checks that `offset_to()` works in positive cases and that `len()` is correct.
-fn check_lf(bwt: &BWT, edges: &[Vec<Pos>], runs: &[Vec<Run>]) {
+fn check_lf(bwt: &BWT, endmarker_edges: &EdgeList, endmarker: &[Pos], edges: &[EdgeList], runs: &[Vec<Run>]) {
+    let endmarker_runs = BWTBuilder::get_runs(endmarker);
+
     // `lf()` at each offset of each record.
     for i in 0..bwt.len() {
         if let Some(record) = bwt.record(i) {
             let mut offset = 0;
-            let mut curr_edges = edges[i].clone();
-            let curr_runs = &runs[i];
+            let (mut curr_edges, curr_runs) = if i == 0 {
+                (endmarker_edges.clone(), &endmarker_runs)
+            } else {
+                (edges[i - 1].clone(), &runs[i - 1])
+            };
             let decompressed = record.decompress();
             assert_eq!(decompressed.len(), record.len(), "Invalid decompressed record {} length", i);
             for run in curr_runs {
                 for _ in 0..run.len {
-                    let edge = curr_edges[run.value];
+                    let edge = Pos::new(run.value, curr_edges.get(run.value).unwrap() as usize);
                     let expected = if edge.node == ENDMARKER { None } else { Some(edge) };
                     assert_eq!(record.lf(offset), expected, "Invalid lf({}) in record {}", offset, i);
                     assert_eq!(decompressed[offset], edge, "Invalid decompressed lf({}) in record {}", offset, i);
                     let expected = if edge.node == ENDMARKER { None } else { Some(offset) };
                     assert_eq!(record.offset_to(edge), expected, "Invalid offset_to(({}, {})) in record {}", edge.node, edge.offset, i);
                     offset += 1;
-                    curr_edges[run.value].offset += 1;
+                    curr_edges.increment(edge.node, 1);
                 }
             }
             assert_eq!(record.len(), offset, "Invalid record {} length", i);
@@ -286,13 +316,15 @@ fn check_predecessor_at(bwt: &BWT) {
 
 #[test]
 fn empty_bwt() {
+    let endmarker_edges = EdgeList::new();
+    let endmarker = Vec::new();
     let edges = Vec::new();
     let runs = Vec::new();
     let invalid_node = 0;
-    let bwt = create_bwt(&edges, &runs);
-    check_records(&bwt, &edges);
+    let bwt = create_bwt(&endmarker_edges, &endmarker, &edges, &runs);
+    check_records(&bwt, &endmarker_edges, &edges);
     check_iter(&bwt);
-    check_lf(&bwt, &edges, &runs);
+    check_lf(&bwt, &endmarker_edges, &endmarker, &edges, &runs);
     check_follow(&bwt, invalid_node);
     negative_offset_to(&bwt, invalid_node);
     serialize::test(&bwt, "empty-bwt", None, true);
@@ -300,11 +332,11 @@ fn empty_bwt() {
 
 #[test]
 fn non_empty_bwt() {
-    let (edges, runs, invalid_node) = get_edges_runs();
-    let bwt = create_bwt(&edges, &runs);
-    check_records(&bwt, &edges);
+    let (endmarker_edges, endmarker, edges, runs, invalid_node) = get_edges_runs();
+    let bwt = create_bwt(&endmarker_edges, &endmarker, &edges, &runs);
+    check_records(&bwt, &endmarker_edges, &edges);
     check_iter(&bwt);
-    check_lf(&bwt, &edges, &runs);
+    check_lf(&bwt, &endmarker_edges, &endmarker, &edges, &runs);
     check_follow(&bwt, invalid_node);
     negative_offset_to(&bwt, invalid_node);
     serialize::test(&bwt, "non-empty-bwt", None, true);
@@ -312,16 +344,16 @@ fn non_empty_bwt() {
 
 #[test]
 fn empty_records() {
-    let (mut edges, mut runs, invalid_node) = get_edges_runs();
-    edges[2] = Vec::new();
-    edges[6] = Vec::new();
+    let (endmarker_edges, endmarker, mut edges, mut runs, invalid_node) = get_edges_runs();
+    edges[2] = EdgeList::new();
+    edges[6] = EdgeList::new();
     runs[2] = Vec::new();
     runs[6] = Vec::new();
  
-    let bwt = create_bwt(&edges, &runs);
-    check_records(&bwt, &edges);
+    let bwt = create_bwt(&endmarker_edges, &endmarker, &edges, &runs);
+    check_records(&bwt, &endmarker_edges, &edges);
     check_iter(&bwt);
-    check_lf(&bwt, &edges, &runs);
+    check_lf(&bwt, &endmarker_edges, &endmarker, &edges, &runs);
     check_follow(&bwt, invalid_node);
     negative_offset_to(&bwt, invalid_node);
     serialize::test(&bwt, "bwt-with-empty", None, true);
@@ -329,11 +361,11 @@ fn empty_records() {
 
 #[test]
 fn bidirectional_bwt() {
-    let (edges, runs, invalid_node) = get_bidirectional();
-    let bwt = create_bwt(&edges, &runs);
-    check_records(&bwt, &edges);
+    let (endmarker_edges, endmarker, edges, runs, invalid_node) = get_bidirectional();
+    let bwt = create_bwt(&endmarker_edges, &endmarker, &edges, &runs);
+    check_records(&bwt, &endmarker_edges, &edges);
     check_iter(&bwt);
-    check_lf(&bwt, &edges, &runs);
+    check_lf(&bwt, &endmarker_edges, &endmarker, &edges, &runs);
     check_follow(&bwt, invalid_node);
     negative_offset_to(&bwt, invalid_node);
     check_predecessor_at(&bwt);

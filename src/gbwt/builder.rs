@@ -13,12 +13,12 @@
 // FIXME: refer to GBWTBuilder, MutableGBWT
 
 use crate::{ENDMARKER, SOURCE_KEY, SOURCE_VALUE};
-use crate::{GBWT, Pos, FullPathName};
-use crate::bwt::SmallPos;
-use crate::support::{SmallRun, Tags};
+use crate::{GBWT, Pos, FullPathName, Metadata, MetadataBuilder};
+use crate::bwt::{BWT, BWTBuilder, SmallPos};
+use crate::headers::{Header, GBWTPayload};
+use crate::support::{SmallRun, Tags, EdgeList};
 
 use std::collections::BTreeMap;
-use std::iter::FusedIterator;
 
 //-----------------------------------------------------------------------------
 
@@ -30,212 +30,6 @@ use std::iter::FusedIterator;
 // The background thread inserts each batch into the MutableGBWT
 // When it receives the end signal, it converts the MutableGBWT into GBWT and sends it back
 // Communication between threads uses channels
-
-//-----------------------------------------------------------------------------
-
-/// A sorted list of edges stored as [`SmallPos`].
-///
-/// If there are at most [`EdgeList::SMALL_CAPACITY`] edges, they are stored inline in a sorted array.
-/// Larger edge sets are stored as a map from node to offset.
-///
-/// # Examples
-///
-/// ```
-/// use gbz::gbwt::builder::EdgeList;
-/// use gbz::Pos;
-///
-/// let mut edges = EdgeList::new();
-/// edges.increment(3, 10);
-/// edges.increment(1, 5);
-/// edges.increment(2, 7);
-/// edges.increment(1, 6);
-/// edges.increment(4, 12); // Triggers conversion to large representation.
-///
-/// assert_eq!(edges.len(), 4);
-/// assert_eq!(edges.get(1), Some(11));
-/// assert_eq!(edges.get(5), None);
-///
-/// let truth = vec![
-///     Pos::new(1, 11),
-///     Pos::new(2, 7),
-///     Pos::new(3, 10),
-///     Pos::new(4, 12)
-/// ];
-/// let edges: Vec<Pos> = edges.iter().collect();
-/// assert_eq!(edges, truth);
-/// ```
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EdgeList {
-    // Up to three edges as (len, edges), with the edges in sorted order.
-    Small(u8, [SmallPos; Self::SMALL_CAPACITY]),
-    // More than three edges as a map from node to offset.
-    Large(BTreeMap<u32, u32>),
-}
-
-impl EdgeList {
-    /// Capacity of the small representation.
-    pub const SMALL_CAPACITY: usize = 3;
-
-    /// Creates an empty edge list.
-    pub fn new() -> Self {
-        EdgeList::Small(0, [SmallPos::default(); Self::SMALL_CAPACITY])
-    }
-
-    /// Returns the number of edges in the list.
-    #[inline]
-    pub fn len(&self) -> usize {
-        match self {
-            EdgeList::Small(len, _) => *len as usize,
-            EdgeList::Large(map) => map.len(),
-        }
-    }
-
-    /// Returns `true` if the list is empty.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Increments the offset in the given edge by the given amount.
-    ///
-    /// Returns the offset before the increment, or `0` if the edge did not exist.
-    /// Inserts a new edge if it does not already exist.
-    pub fn increment(&mut self, node: usize, amount: usize) -> u32 {
-        match self {
-            EdgeList::Small(len, edges) => {
-                for edge in edges.iter_mut().take(*len as usize) {
-                    if edge.node == node as u32 {
-                        let val = edge.offset;
-                        edge.offset += amount as u32;
-                        return val;
-                    }
-                }
-                if *len < Self::SMALL_CAPACITY as u8 {
-                    edges[*len as usize] = SmallPos::new(node, amount);
-                    // Bubble up the new edge to maintain sorted order.
-                    for i in (1..=*len as usize).rev() {
-                        if edges[i] < edges[i - 1] {
-                            edges.swap(i, i - 1);
-                        } else {
-                            break;
-                        }
-                    }
-                    *len += 1;
-                } else {
-                    // Convert to large representation.
-                    let mut map = BTreeMap::new();
-                    for edge in edges.iter().take(*len as usize) {
-                        map.insert(edge.node, edge.offset);
-                    }
-                    map.insert(node as u32, amount as u32);
-                    *self = EdgeList::Large(map);
-                }
-                0
-            }
-            EdgeList::Large(map) => {
-                let entry = map.entry(node as u32).or_insert(0);
-                let val = *entry;
-                *entry += amount as u32;
-                val
-            }
-        }
-    }
-
-    /// Returns the offset in the given edge, or [`None`] if it does not exist.
-    pub fn get(&self, node: usize) -> Option<u32> {
-        match self {
-            EdgeList::Small(len, edges) => {
-                for edge in edges.iter().take(*len as usize) {
-                    if edge.node == node as u32 {
-                        return Some(edge.offset);
-                    }
-                }
-                None
-            }
-            EdgeList::Large(map) => map.get(&(node as u32)).copied(),
-        }
-    }
-
-    /// Returns a mutable reference to the offset in the given edge, or [`None`] if it does not exist.
-    pub fn get_mut(&mut self, node: usize) -> Option<&mut u32> {
-        match self {
-            EdgeList::Small(len, edges) => {
-                for edge in edges.iter_mut().take(*len as usize) {
-                    if edge.node == node as u32 {
-                        return Some(&mut edge.offset);
-                    }
-                }
-                None
-            }
-            EdgeList::Large(map) => map.get_mut(&(node as u32)),
-        }
-    }
-
-    /// Returns an iterator over the edges in the list, in sorted order.
-    pub fn iter(&self) -> EdgeListIter<'_> {
-        match self {
-            EdgeList::Small(_, _) => EdgeListIter {
-                parent: self,
-                index: 0,
-                iter: std::collections::btree_map::Iter::<'_, u32, u32>::default(),
-            },
-            EdgeList::Large(map) => EdgeListIter {
-                parent: self,
-                index: 0,
-                iter: map.iter(),
-            },
-        }
-    }
-}
-
-impl Default for EdgeList {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// An iterator over the edges in an [`EdgeList`].
-///
-/// The value of `Item` is [`Pos`].
-pub struct EdgeListIter<'a> {
-    parent: &'a EdgeList,
-    index: usize,
-    iter: std::collections::btree_map::Iter<'a, u32, u32>,
-}
-
-impl<'a> Iterator for EdgeListIter<'a> {
-    type Item = Pos;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.parent {
-            EdgeList::Small(len, edges) => {
-                if self.index < *len as usize {
-                    let pos = edges[self.index];
-                    self.index += 1;
-                    Some(Pos::from(pos))
-                } else {
-                    None
-                }
-            }
-            EdgeList::Large(map) => {
-                if self.index < map.len() {
-                    self.index += 1;
-                }
-                self.iter.next().map(|(node, offset)| Pos::new(*node as usize, *offset as usize))
-            }
-        }
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = self.parent.len() - self.index;
-        (len, Some(len))
-    }
-}
-
-impl ExactSizeIterator for EdgeListIter<'_> {}
-
-impl FusedIterator for EdgeListIter<'_> {}
 
 //-----------------------------------------------------------------------------
 
@@ -401,8 +195,7 @@ impl RunBuilder {
 
 //-----------------------------------------------------------------------------
 
-// FIXME: impl From<&MutableGBWT> for GBWT
-// FIXME: from_gbwt (drop partial metadata, DA samples)
+// TODO: from_gbwt (lossy conversion: drop partial metadata, DA samples)
 /// A data structure for building [`GBWT`] indexes.
 ///
 /// An empty index can be created with [`Self::new`].
@@ -449,13 +242,13 @@ pub struct MutableGBWT {
     // GBWT tags.
     tags: Tags,
     // Endmarker record as an array of starting positions for each sequence.
-    endmarker: Vec<SmallPos>,
+    endmarker: Vec<Pos>,
     // Outgoing edges from the endmarker as (node id, number of sequences starting with that node).
     endmarker_edges: EdgeList,
     // Other records as a map from node id to mutable record.
     records: BTreeMap<usize, MutableRecord>,
-    // Optional metadata as a vector of path names.
-    metadata: Option<Vec<FullPathName>>,
+    // Optional metadata.
+    metadata: Option<MetadataBuilder>,
 }
 
 /// Queries.
@@ -465,7 +258,7 @@ impl MutableGBWT {
         self.len
     }
 
-    /// Returns `true` if the GBWT is empty (this should not happen).
+    /// Returns `true` if the GBWT is empty.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -528,7 +321,7 @@ impl MutableGBWT {
         }
 
         let mut result = Vec::new();
-        let mut pos = Pos::from(self.endmarker[sequence_id]);
+        let mut pos = self.endmarker[sequence_id];
         while pos.node != ENDMARKER {
             result.push(pos.node as u32);
             let record = self.records.get(&pos.node)?;
@@ -541,8 +334,9 @@ impl MutableGBWT {
     /// Returns the name of the given path, or [`None`] if the index does not have metadata or the path id is out of bounds.
     ///
     /// This is mostly intended for testing.
-    pub fn path_name(&self, path_id: usize) -> Option<&FullPathName> {
-        self.metadata.as_ref()?.get(path_id)
+    pub fn path_name(&self, path_id: usize) -> Option<FullPathName> {
+        let metadata = self.metadata.as_ref()?;
+        metadata.path_name(path_id)
     }
 }
 
@@ -570,7 +364,7 @@ impl MutableGBWT {
             endmarker: Vec::new(),
             endmarker_edges: EdgeList::new(),
             records: BTreeMap::new(),
-            metadata: if with_metadata { Some(Vec::new()) } else { None },
+            metadata: if with_metadata { Some(MetadataBuilder::new()) } else { None },
         }
     }
 
@@ -605,7 +399,10 @@ impl MutableGBWT {
                 if names.len() != expected {
                     return Err(format!("MutableGBWT: Expected {} path names, got {}", expected, names.len()));
                 }
-                metadata.extend_from_slice(names);
+                for path_name in names.iter() {
+                    // FIXME: insert all at once. otherwise we may modify the metadata before we get an error
+                    metadata.insert(path_name)?;
+                }
                 Ok(())
             }
             (None, Some(_)) => Err(String::from("MutableGBWT: Path names provided for a GBWT without metadata")),
@@ -623,7 +420,7 @@ impl MutableGBWT {
             let offset = self.endmarker_edges.increment(start, 1) as usize;
             let pos = SmallPos::new(start, offset);
             sequence.next = pos;
-            self.endmarker.push(pos);
+            self.endmarker.push(Pos::from(pos));
         }
         for edge in self.endmarker_edges.iter().filter(|edge| edge.node != ENDMARKER) {
             self.records.entry(edge.node).or_default().set_visits(ENDMARKER, edge.offset);
@@ -645,6 +442,7 @@ impl MutableGBWT {
                 let seq = &mut sequences[i];
                 while new_bwt.target_len < seq.curr.offset as usize {
                     if remaining.len == 0 {
+                        // This can only fail if MutableGBWT is in an inconsistent state.
                         remaining = run_iter.next()
                             .expect("MutableGBWT: Existing runs did not reach the inserted position");
                     }
@@ -798,6 +596,46 @@ impl MutableGBWT {
     }
 }
 
+impl TryFrom<MutableGBWT> for GBWT {
+    type Error = String;
+
+    fn try_from(builder: MutableGBWT) -> Result<Self, String> {
+        // Header and tags.
+        let mut header = Header::<GBWTPayload>::default();
+        if builder.bidirectional {
+            header.set(GBWTPayload::FLAG_BIDIRECTIONAL);
+        }
+        if builder.has_metadata() {
+            header.set(GBWTPayload::FLAG_METADATA);
+        }
+        header.payload_mut().sequences = builder.sequence_count();
+        header.payload_mut().size = builder.len();
+        if let Some(min_node) = builder.min_node() {
+            header.payload_mut().offset = min_node - 1;
+        }
+        if let Some(max_node) = builder.max_node() {
+            header.payload_mut().alphabet_size = max_node + 1;
+        } else if !builder.is_empty() {
+            // Special case when we have only empty sequences.
+            header.payload_mut().alphabet_size = 1;
+        }
+
+        // BWT and endmarker.
+        let mut bwt_builder = BWTBuilder::new(&builder.endmarker_edges, &builder.endmarker);
+        // FIXME: encode the rest, including empty nodes
+        let bwt = BWT::from(bwt_builder);
+
+        Ok(GBWT {
+            header,
+            tags: builder.tags,
+            bwt,
+            endmarker: builder.endmarker,
+            da_samples: Vec::new(),
+            metadata: builder.metadata.map(Metadata::from),
+        })
+    }
+}
+
 //-----------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -814,97 +652,6 @@ mod tests {
         assert_eq!(std::mem::size_of::<EdgeList>(), 32, "EdgeList should be 32 bytes");
         assert_eq!(std::mem::size_of::<MutableRecord>(), 96, "MutableRecord should be 96 bytes");
         assert_eq!(std::mem::size_of::<Sequence>(), 32, "Sequence should be 32 bytes");
-    }
-
-//-----------------------------------------------------------------------------
-
-    #[test]
-    fn edge_list_empty() {
-        let edges = EdgeList::new();
-        assert!(edges.is_empty(), "Edge list should be empty");
-        assert_eq!(edges.len(), 0, "Edge list should have length 0");
-        assert_eq!(edges.get(1), None, "Edge list should not contain any edges");
-        assert_eq!(edges.iter().count(), 0, "Edge list iterator should be empty");
-    }
-
-    fn create_edge_list_and_sort(truth: &mut [Pos]) -> EdgeList {
-        let mut edges = EdgeList::new();
-        for edge in truth.iter() {
-            edges.increment(edge.node, edge.offset);
-        }
-        truth.sort();
-        edges
-    }
-
-    // Assumes that the truth is sorted and non-empty.
-    fn check_edge_list(edges: &EdgeList, truth: &[Pos]) {
-        assert!(!edges.is_empty(), "Edge list should not be empty");
-        assert_eq!(edges.len(), truth.len(), "Edge list should have length {}", truth.len());
-
-        let mut max_node = 0;
-        for edge in truth.iter() {
-            let offset = edge.offset as u32;
-            assert_eq!(edges.get(edge.node), Some(offset), "Edge list should contain edge ({}, {})", edge.node, edge.offset);
-            if edge.node > max_node {
-                max_node = edge.node;
-            }
-        }
-        assert!(edges.get(max_node + 1).is_none(), "Edge list should not contain edge ({}, _)", max_node + 1);
-
-        // Increment the offsets in a copy and check them again.
-        let mut copy = edges.clone();
-        for edge in truth.iter() {
-            let offset = copy.get_mut(edge.node);
-            assert!(offset.is_some(), "Edge list should contain edge ({}, _)", edge.node);
-            let offset = offset.unwrap();
-            *offset += 1;
-        }
-        for edge in truth.iter() {
-            let offset = edge.offset as u32 + 1;
-            assert_eq!(copy.get(edge.node), Some(offset), "Incremented edge list should contain edge ({}, {})", edge.node, offset);
-        }
-    }
-
-    #[test]
-    fn edge_list_small() {
-        let mut truth = vec![
-            Pos::new(3, 10),
-            Pos::new(1, 5),
-            Pos::new(2, 7),
-        ];
-        let edges = create_edge_list_and_sort(&mut truth);
-        check_edge_list(&edges, &truth);
-    }
-
-    #[test]
-    fn edge_list_large() {
-        let mut truth = vec![
-            Pos::new(3, 10),
-            Pos::new(1, 5),
-            Pos::new(2, 7),
-            Pos::new(4, 12),
-            Pos::new(10, 18),
-        ];
-        let edges = create_edge_list_and_sort(&mut truth);
-        check_edge_list(&edges, &truth);
-    }
-
-    #[test]
-    fn edge_list_increment() {
-        let mut truth = vec![
-            Pos::new(3, 10),
-            Pos::new(1, 6),
-            Pos::new(2, 8),
-            Pos::new(4, 12),
-            Pos::new(10, 18),
-        ];
-        let mut edges = EdgeList::new();
-        for edge in truth.iter() {
-            edges.increment(edge.node, edge.offset / 2);
-            edges.increment(edge.node, edge.offset / 2);
-        }
-        truth.sort();
-        check_edge_list(&edges, &truth);
     }
 
 //-----------------------------------------------------------------------------
@@ -1148,7 +895,8 @@ mod tests {
             }
 
             if builder.has_metadata() {
-                assert_eq!(builder.path_name(i), Some(&path_names[i]), "MutableGBWT should return correct path name for path {} ({})", i, test_case);
+                let expected_name = path_names[i].clone();
+                assert_eq!(builder.path_name(i), Some(expected_name), "MutableGBWT should return correct path name for path {} ({})", i, test_case);
             } else {
                 assert_eq!(builder.path_name(i), None, "MutableGBWT should not have path names ({})", test_case);
             }

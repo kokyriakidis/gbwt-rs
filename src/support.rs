@@ -1,5 +1,8 @@
 //! Support structures for GBWT and GBZ.
 
+use crate::Pos;
+use crate::bwt::SmallPos;
+
 use simple_sds::int_vector::IntVector;
 use simple_sds::ops::{Vector, Access, Push, BitVec, Select};
 use simple_sds::serialize::Serialize;
@@ -1618,5 +1621,229 @@ impl DisjointSets {
         result
     }
 }
+
+//-----------------------------------------------------------------------------
+
+/// A sorted list of edges stored as [`SmallPos`].
+///
+/// If there are at most [`EdgeList::SMALL_CAPACITY`] edges, they are stored inline in a sorted array.
+/// Larger edge sets are stored as a map from node to offset.
+///
+/// # Examples
+///
+/// ```
+/// use gbz::support::EdgeList;
+/// use gbz::Pos;
+///
+/// let mut edges = EdgeList::new();
+/// edges.increment(3, 10);
+/// edges.increment(1, 5);
+/// edges.increment(2, 7);
+/// edges.increment(1, 6);
+/// edges.increment(4, 12); // Triggers conversion to large representation.
+///
+/// assert_eq!(edges.len(), 4);
+/// assert_eq!(edges.get(1), Some(11));
+/// assert_eq!(edges.get(5), None);
+///
+/// let truth = vec![
+///     Pos::new(1, 11),
+///     Pos::new(2, 7),
+///     Pos::new(3, 10),
+///     Pos::new(4, 12)
+/// ];
+/// let edges: Vec<Pos> = edges.iter().collect();
+/// assert_eq!(edges, truth);
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EdgeList {
+    // Up to three edges as (len, edges), with the edges in sorted order.
+    Small(u8, [SmallPos; Self::SMALL_CAPACITY]),
+    // More than three edges as a map from node to offset.
+    Large(BTreeMap<u32, u32>),
+}
+
+impl EdgeList {
+    /// Capacity of the small representation.
+    pub const SMALL_CAPACITY: usize = 3;
+
+    /// Creates an empty edge list.
+    pub fn new() -> Self {
+        EdgeList::Small(0, [SmallPos::default(); Self::SMALL_CAPACITY])
+    }
+
+    /// Returns the number of edges in the list.
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            EdgeList::Small(len, _) => *len as usize,
+            EdgeList::Large(map) => map.len(),
+        }
+    }
+
+    /// Returns `true` if the list is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Increments the offset in the given edge by the given amount.
+    ///
+    /// Returns the offset before the increment, or `0` if the edge did not exist.
+    /// Inserts a new edge if it does not already exist.
+    pub fn increment(&mut self, node: usize, amount: usize) -> u32 {
+        match self {
+            EdgeList::Small(len, edges) => {
+                for edge in edges.iter_mut().take(*len as usize) {
+                    if edge.node == node as u32 {
+                        let val = edge.offset;
+                        edge.offset += amount as u32;
+                        return val;
+                    }
+                }
+                if *len < Self::SMALL_CAPACITY as u8 {
+                    edges[*len as usize] = SmallPos::new(node, amount);
+                    // Bubble up the new edge to maintain sorted order.
+                    for i in (1..=*len as usize).rev() {
+                        if edges[i] < edges[i - 1] {
+                            edges.swap(i, i - 1);
+                        } else {
+                            break;
+                        }
+                    }
+                    *len += 1;
+                } else {
+                    // Convert to large representation.
+                    let mut map = BTreeMap::new();
+                    for edge in edges.iter().take(*len as usize) {
+                        map.insert(edge.node, edge.offset);
+                    }
+                    map.insert(node as u32, amount as u32);
+                    *self = EdgeList::Large(map);
+                }
+                0
+            }
+            EdgeList::Large(map) => {
+                let entry = map.entry(node as u32).or_insert(0);
+                let val = *entry;
+                *entry += amount as u32;
+                val
+            }
+        }
+    }
+
+    /// Replaces the offset in each edge with the rank of the node in the set of nodes.
+    pub fn set_ranks(&mut self) {
+        match self {
+            EdgeList::Small(len, edges) => {
+                for i in 0..*len as usize {
+                    edges[i].offset = i as u32;
+                }
+            }
+            EdgeList::Large(map) => {
+                let mut rank = 0;
+                for offset in map.values_mut() {
+                    *offset = rank;
+                    rank += 1;
+                }
+            }
+        }
+    }
+
+    /// Returns the offset in the given edge, or [`None`] if it does not exist.
+    pub fn get(&self, node: usize) -> Option<u32> {
+        match self {
+            EdgeList::Small(len, edges) => {
+                for edge in edges.iter().take(*len as usize) {
+                    if edge.node == node as u32 {
+                        return Some(edge.offset);
+                    }
+                }
+                None
+            }
+            EdgeList::Large(map) => map.get(&(node as u32)).copied(),
+        }
+    }
+
+    /// Returns a mutable reference to the offset in the given edge, or [`None`] if it does not exist.
+    pub fn get_mut(&mut self, node: usize) -> Option<&mut u32> {
+        match self {
+            EdgeList::Small(len, edges) => {
+                for edge in edges.iter_mut().take(*len as usize) {
+                    if edge.node == node as u32 {
+                        return Some(&mut edge.offset);
+                    }
+                }
+                None
+            }
+            EdgeList::Large(map) => map.get_mut(&(node as u32)),
+        }
+    }
+
+    /// Returns an iterator over the edges in the list, in sorted order.
+    pub fn iter(&self) -> EdgeListIter<'_> {
+        match self {
+            EdgeList::Small(_, _) => EdgeListIter {
+                parent: self,
+                index: 0,
+                iter: std::collections::btree_map::Iter::<'_, u32, u32>::default(),
+            },
+            EdgeList::Large(map) => EdgeListIter {
+                parent: self,
+                index: 0,
+                iter: map.iter(),
+            },
+        }
+    }
+}
+
+impl Default for EdgeList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// An iterator over the edges in an [`EdgeList`].
+///
+/// The value of `Item` is [`Pos`].
+pub struct EdgeListIter<'a> {
+    parent: &'a EdgeList,
+    index: usize,
+    iter: std::collections::btree_map::Iter<'a, u32, u32>,
+}
+
+impl<'a> Iterator for EdgeListIter<'a> {
+    type Item = Pos;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.parent {
+            EdgeList::Small(len, edges) => {
+                if self.index < *len as usize {
+                    let pos = edges[self.index];
+                    self.index += 1;
+                    Some(Pos::from(pos))
+                } else {
+                    None
+                }
+            }
+            EdgeList::Large(map) => {
+                if self.index < map.len() {
+                    self.index += 1;
+                }
+                self.iter.next().map(|(node, offset)| Pos::new(*node as usize, *offset as usize))
+            }
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.parent.len() - self.index;
+        (len, Some(len))
+    }
+}
+
+impl ExactSizeIterator for EdgeListIter<'_> {}
+
+impl FusedIterator for EdgeListIter<'_> {}
 
 //-----------------------------------------------------------------------------

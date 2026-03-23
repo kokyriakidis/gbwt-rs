@@ -639,3 +639,114 @@ fn filtered_disjoint_sets() {
 }
 
 //-----------------------------------------------------------------------------
+
+#[test]
+fn edge_list_empty() {
+    let edges = EdgeList::new();
+    assert!(edges.is_empty(), "Edge list should be empty");
+    assert_eq!(edges.len(), 0, "Edge list should have length 0");
+    assert_eq!(edges.get(1), None, "Edge list should not contain any edges");
+    assert_eq!(edges.iter().count(), 0, "Edge list iterator should be empty");
+}
+
+fn create_edge_list_and_sort(truth: &mut [Pos]) -> EdgeList {
+    let mut edges = EdgeList::new();
+    for edge in truth.iter() {
+        edges.increment(edge.node, edge.offset);
+    }
+    truth.sort();
+    edges
+}
+
+// Assumes that the truth is sorted and non-empty.
+fn check_edge_list(edges: &EdgeList, truth: &[Pos]) {
+    assert!(!edges.is_empty(), "Edge list should not be empty");
+    assert_eq!(edges.len(), truth.len(), "Edge list should have length {}", truth.len());
+
+    let mut max_node = 0;
+    for edge in truth.iter() {
+        let offset = edge.offset as u32;
+        assert_eq!(edges.get(edge.node), Some(offset), "Edge list should contain edge ({}, {})", edge.node, edge.offset);
+        if edge.node > max_node {
+            max_node = edge.node;
+        }
+    }
+    assert!(edges.get(max_node + 1).is_none(), "Edge list should not contain edge ({}, _)", max_node + 1);
+
+    // Increment the offsets in a copy and check them again.
+    let mut copy = edges.clone();
+    for edge in truth.iter() {
+        let offset = copy.get_mut(edge.node);
+        assert!(offset.is_some(), "Edge list should contain edge ({}, _)", edge.node);
+        let offset = offset.unwrap();
+        *offset += 1;
+    }
+    for edge in truth.iter() {
+        let offset = edge.offset as u32 + 1;
+        assert_eq!(copy.get(edge.node), Some(offset), "Incremented edge list should contain edge ({}, {})", edge.node, offset);
+    }
+}
+
+#[test]
+fn edge_list_small() {
+    let mut truth = vec![
+        Pos::new(3, 10),
+        Pos::new(1, 5),
+        Pos::new(2, 7),
+    ];
+    let edges = create_edge_list_and_sort(&mut truth);
+    check_edge_list(&edges, &truth);
+}
+
+#[test]
+fn edge_list_large() {
+    let mut truth = vec![
+        Pos::new(3, 10),
+        Pos::new(1, 5),
+        Pos::new(2, 7),
+        Pos::new(4, 12),
+        Pos::new(10, 18),
+    ];
+    let edges = create_edge_list_and_sort(&mut truth);
+    check_edge_list(&edges, &truth);
+}
+
+#[test]
+fn edge_list_increment() {
+    let mut truth = vec![
+        Pos::new(3, 10),
+        Pos::new(1, 6),
+        Pos::new(2, 8),
+        Pos::new(4, 12),
+        Pos::new(10, 18),
+    ];
+    let mut edges = EdgeList::new();
+    for edge in truth.iter() {
+        edges.increment(edge.node, edge.offset / 2);
+        edges.increment(edge.node, edge.offset / 2);
+    }
+    truth.sort();
+    check_edge_list(&edges, &truth);
+}
+
+#[test]
+fn edge_list_ranks() {
+    let mut truth = vec![
+        Pos::new(3, 2),
+        Pos::new(1, 0),
+        Pos::new(2, 1),
+        Pos::new(4, 3),
+        Pos::new(10, 4),
+    ];
+    let mut edges = EdgeList::new();
+    for edge in truth.iter() {
+        // Initialize the edge list with arbitrary offsets.
+        edges.increment(edge.node, 10);
+    }
+
+    edges.set_ranks();
+    truth.sort();
+    check_edge_list(&edges, &truth);
+}
+
+//-----------------------------------------------------------------------------

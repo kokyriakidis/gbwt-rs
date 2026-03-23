@@ -562,6 +562,7 @@ impl fmt::Display for FullPathName {
 /// The created metadata will contain path, sample, and contig names.
 /// Path names must be added in the same order as the paths in the corresponding [`crate::GBWT`] index.
 /// See [`Metadata`] for an example.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MetadataBuilder {
     sample_names: Vec<String>,
     sample_set: HashMap<String, usize>,
@@ -575,15 +576,7 @@ pub struct MetadataBuilder {
 impl MetadataBuilder {
     /// Creates a new metadata builder.
     pub fn new() -> Self {
-        MetadataBuilder {
-            sample_names: Vec::new(),
-            sample_set: HashMap::new(),
-            contig_names: Vec::new(),
-            contig_set: HashMap::new(),
-            path_names: Vec::new(),
-            path_set: HashSet::new(),
-            haplotypes: HashSet::new(),
-        }
+        MetadataBuilder::default()
     }
 
     /// Inserts a path name to the builder.
@@ -614,11 +607,21 @@ impl MetadataBuilder {
 
         Ok(())
     }
-}
 
-impl Default for MetadataBuilder {
-    fn default() -> Self {
-        Self::new()
+    /// Returns the name of the path with the given identifier, or [`None`] if there is no such name.
+    pub fn path_name(&self, id: usize) -> Option<FullPathName> {
+        if id < self.path_names.len() {
+            let path_name = self.path_names[id];
+            let sample = self.sample_names.get(path_name.sample())?.clone();
+            let contig = self.contig_names.get(path_name.contig())?.clone();
+            Some(FullPathName {
+                sample, contig,
+                haplotype: path_name.phase(),
+                fragment: path_name.fragment(),
+            })
+        } else {
+            None
+        }
     }
 }
 

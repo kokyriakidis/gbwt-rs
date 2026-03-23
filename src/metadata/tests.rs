@@ -325,8 +325,17 @@ fn metadata_builder() {
         let result = builder.insert(&full_path_name);
         assert!(result.is_ok(), "Failed to insert path name {} to builder: {}", path_id, result.err().unwrap());
     }
-    let metadata = Metadata::from(builder);
 
+    // Check that we can get `FullPathName`s back from the builder.
+    for path_id in 0..truth.paths() {
+        let path_name = builder.path_name(path_id).unwrap();
+        let true_name = FullPathName::from_metadata(&truth, path_id).unwrap();
+        assert_eq!(path_name, true_name, "FullPathName differs for path {}", path_id);
+    }
+    assert!(builder.path_name(truth.paths()).is_none(), "Got a path name past the end of the builder");
+
+    // Compare the result against the truth.
+    let metadata = Metadata::from(builder);
     compare_full_metadata(&metadata, &truth);
 }
 
