@@ -57,6 +57,7 @@ pub mod internal;
 
 pub use crate::bwt::Pos;
 pub use crate::gbwt::{GBWT, SearchState, BidirectionalState};
+pub use crate::gbwt::builder::MutableGBWT;
 pub use crate::gbz::GBZ;
 pub use crate::sequences::Segment;
 pub use crate::metadata::{Metadata, MetadataBuilder, PathName, FullPathName};

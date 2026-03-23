@@ -12,10 +12,10 @@
 //! > DOI: [10.1016/j.tcs.2012.02.002](https://doi.org/10.1016/j.tcs.2012.02.002)
 // FIXME: refer to GBWTBuilder, MutableGBWT
 
-use crate::ENDMARKER;
-use crate::{Pos, FullPathName};
+use crate::{ENDMARKER, SOURCE_KEY, SOURCE_VALUE};
+use crate::{GBWT, Pos, FullPathName};
 use crate::bwt::SmallPos;
-use crate::support::SmallRun;
+use crate::support::{SmallRun, Tags};
 
 use std::collections::BTreeMap;
 use std::iter::FusedIterator;
@@ -401,9 +401,9 @@ impl RunBuilder {
 
 //-----------------------------------------------------------------------------
 
-// FIXME: tests, examples
-// FIXME: impl From<MutableGBWT> for GBWT (and the other way around?)
-/// A data structure for building [`crate::GBWT`] indexes.
+// FIXME: impl From<&MutableGBWT> for GBWT
+// FIXME: from_gbwt (drop partial metadata, DA samples)
+/// A data structure for building [`GBWT`] indexes.
 ///
 /// An empty index can be created with [`Self::new`].
 /// Each [`Self::insert`] inserts a batch of sequences.
@@ -412,12 +412,42 @@ impl RunBuilder {
 /// * Each step extends each sequence in the batch by one node.
 ///   If multiple sequences visit the same node in the same step, the node record is updated only once.
 /// * If all sequences traverse the same part of the graph, the algorithm may benefit from memory locality.
+///
+/// # Examples
+///
+/// ```
+/// use gbz::{MutableGBWT, ENDMARKER};
+///
+/// // Unidirectional GBWT with no metadata.
+/// let mut builder = MutableGBWT::new(false, false);
+/// assert!(!builder.is_bidirectional());
+/// assert!(!builder.has_metadata());
+///
+/// // Insert four sequences in two batches.
+/// let buffer = vec![
+///     1, 3, 5, ENDMARKER as u32,
+///     2, 4, 6, ENDMARKER as u32,
+/// ];
+/// builder.insert(&buffer, None).expect("Failed to insert sequences");
+/// let buffer = vec![
+///     1, 4, 5, ENDMARKER as u32,
+///     2, 3, 6, ENDMARKER as u32,
+/// ];
+/// builder.insert(&buffer, None).expect("Failed to insert sequences");
+///
+/// assert_eq!(builder.len(), 16);
+/// assert_eq!(builder.sequence_count(), 4);
+/// assert_eq!(builder.node_count(), 6);
+/// assert_eq!(builder.sequence(2), Some(vec![1, 4, 5]));
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MutableGBWT {
     // Total length of the sequences, including endmarkers.
     len: usize,
     // Is the GBWT bidirectional?
     bidirectional: bool,
+    // GBWT tags.
+    tags: Tags,
     // Endmarker record as an array of starting positions for each sequence.
     endmarker: Vec<SmallPos>,
     // Outgoing edges from the endmarker as (node id, number of sequences starting with that node).
@@ -479,10 +509,20 @@ impl MutableGBWT {
         }
     }
 
+    /// Returns a reference to the GBWT tags.
+    pub fn tags(&self) -> &Tags {
+        &self.tags
+    }
+
+    /// Returns a mutable reference to the GBWT tags.
+    pub fn tags_mut(&mut self) -> &mut Tags {
+        &mut self.tags
+    }
+
     /// Returns the given sequence, or [`None`] if the index is out of bounds.
     ///
     /// This is mostly intended for testing.
-    pub fn extract(&self, sequence_id: usize) -> Option<Vec<u32>> {
+    pub fn sequence(&self, sequence_id: usize) -> Option<Vec<u32>> {
         if sequence_id >= self.endmarker.len() {
             return None;
         }
@@ -518,10 +558,15 @@ impl MutableGBWT {
     /// Each [`Self::insert`] call must then be accompanied by path names for the inserted sequences, one per path.
     /// If the GBWT is bidirectional, each name corresponds to a pair of sequences.
     /// Otherwise each sequence is a separate path.
+    ///
+    /// The newly created index will contain the [`SOURCE_KEY`] tag but no other tags.
     pub fn new(bidirectional: bool, with_metadata: bool) -> Self {
+        let mut tags = Tags::new();
+        tags.insert(SOURCE_KEY, SOURCE_VALUE);
         Self {
             len: 0,
             bidirectional,
+            tags,
             endmarker: Vec::new(),
             endmarker_edges: EdgeList::new(),
             records: BTreeMap::new(),
@@ -569,13 +614,15 @@ impl MutableGBWT {
         }
     }
 
-    // Appends sequence starts to the endmarker record and updates the incoming edges of the first nodes.
+    // Appends sequence starts to the endmarker record, determines the GBWT positions,
+    // and updates the incoming edges of the first nodes.
     fn append_sequence_starts(&mut self, sequences: &mut [Sequence]) {
-        for sequence in sequences.iter_mut() {
+        for (i, sequence) in sequences.iter_mut().enumerate() {
+            sequence.curr = SmallPos::new(ENDMARKER, i);
             let start = sequence.nodes.first().copied().unwrap_or(ENDMARKER as u32) as usize;
             let offset = self.endmarker_edges.increment(start, 1) as usize;
             let pos = SmallPos::new(start, offset);
-            sequence.curr = pos;
+            sequence.next = pos;
             self.endmarker.push(pos);
         }
         for edge in self.endmarker_edges.iter().filter(|edge| edge.node != ENDMARKER) {
@@ -599,7 +646,7 @@ impl MutableGBWT {
                 while new_bwt.target_len < seq.curr.offset as usize {
                     if remaining.len == 0 {
                         remaining = run_iter.next()
-                            .expect("MutableGBWT: Existing runs should reach the inserted position");
+                            .expect("MutableGBWT: Existing runs did not reach the inserted position");
                     }
                     remaining = new_bwt.insert_source_run(remaining, seq.curr.offset as usize);
                 }
@@ -607,6 +654,7 @@ impl MutableGBWT {
                 seq.next.offset = new_bwt.rank(seq.next.node as usize);
                 new_bwt.insert_target_value(seq.next.node as usize);
                 i += 1;
+                current.len += 1;
             }
             if remaining.len > 0 {
                 new_bwt.insert_source_run(remaining, usize::MAX);
@@ -693,12 +741,12 @@ impl MutableGBWT {
         }
     }
 
-    // Advances the sequences to the next offset.
+    // Advances the sequences to the given offset, assuming that they are at the previous offset.
     // The sequences are now sorted by `curr`.
     // Determines the node but not the offset in the new successor GBWT position.
-    fn advance_sequences(&mut self, sequences: &mut [Sequence], next_offset: usize) {
+    fn advance_sequences(&mut self, sequences: &mut [Sequence], curr_offset: usize) {
         for sequence in sequences.iter_mut() {
-            let next_node = sequence.nodes.get(next_offset).copied().unwrap_or(ENDMARKER as u32) as usize;
+            let next_node = sequence.nodes.get(curr_offset + 1).copied().unwrap_or(ENDMARKER as u32) as usize;
             sequence.curr = sequence.next;
             sequence.next = SmallPos::new(next_node, 0);
         }
@@ -728,22 +776,22 @@ impl MutableGBWT {
         self.append_metadata(sequences.len(), names)?;
         self.append_sequence_starts(&mut sequences);
         let mut active_sequences = self.sort_sequences(&mut sequences);
+        self.advance_sequences(active_sequences, 0);
         self.len += buffer.len();
 
         // Invariants:
-        // * GBWT position `curr` corresponds to `nodes[offset - 1]`.
+        // * GBWT position `curr` corresponds to `nodes[curr_offset]`.
         // * The sequences are sorted by `curr`.
-        // * `nodes[0..offset]` have been inserted.
-        // * `next.node` (`nodes[offset]`) should be inserted to GBWT offset `curr.offset` in the record for `curr.node`.
-        // * If `nodes[offset]` exists, incoming edges for `next.node` already include the visit from `curr.node`.
-        let mut offset = 0;
+        // * `nodes[0..curr_offset]` have been inserted into the BWTs.
+        // * `next.node` (`nodes[curr_offset + 1]`) should be inserted to BWT offset `curr.offset` in the record for `curr.node`.
+        let mut curr_offset = 0;
         while !active_sequences.is_empty() {
             self.update_bwts(active_sequences);
             self.add_records_and_edges(active_sequences);
-            offset += 1;
             active_sequences = self.sort_sequences(active_sequences);
             self.determine_offsets(active_sequences);
-            self.advance_sequences(active_sequences, offset);
+            curr_offset += 1;
+            self.advance_sequences(active_sequences, curr_offset);
         }
 
         Ok(())
@@ -755,6 +803,10 @@ impl MutableGBWT {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::support;
+    use simple_sds::serialize;
+    use std::collections::HashSet;
 
     #[test]
     #[ignore]
@@ -1051,13 +1103,166 @@ mod tests {
 
 //-----------------------------------------------------------------------------
 
-    // FIXME: tests for MutableGBWT
+    fn expected_sequence(path: &[usize], reverse: bool) -> Vec<u32> {
+        if reverse {
+            let reversed = support::reverse_path(path);
+            reversed.iter().copied().map(|node| node as u32).collect()
+        } else {
+            path.iter().copied().map(|node| node as u32).collect()
+        }
+    }
 
-    // empty
+    // This assumes that the flags in the builder are correct.
+    fn check_mutable_gbwt(builder: &MutableGBWT, paths: &[Vec<usize>], path_names: &[FullPathName], test_case: &str) {
+        let mut len: usize = paths.iter().map(|path| path.len() + 1).sum();
+        if builder.is_bidirectional() {
+            len *= 2;
+        }
+        assert_eq!(builder.len(), len, "MutableGBWT should have correct length ({})", test_case);
 
-    // { 1, 2 } batches x { with, without } metadata x { unidirectional, bidirectional }
+        let mut nodes: HashSet<usize> = HashSet::new();
+        for path in paths.iter() {
+            for &node in path.iter() {
+                nodes.insert(node);
+                if builder.is_bidirectional() {
+                    nodes.insert(support::flip_node(node));
+                }
+            }
+        }
+        assert_eq!(builder.node_count(), nodes.len(), "MutableGBWT should have correct node count ({})", test_case);
 
-    // validate by checking flags, statistics and extracting paths, names
+        let sequence_count = if builder.is_bidirectional() { paths.len() * 2 } else { paths.len() };
+        assert_eq!(builder.sequence_count(), sequence_count, "MutableGBWT should have correct sequence count ({})", test_case);
+        assert_eq!(builder.path_count(), paths.len(), "MutableGBWT should have correct path count ({})", test_case);
+
+        // Check sequences and path names.
+        for (i, path) in paths.iter().enumerate() {
+            if builder.is_bidirectional() {
+                let expected_forward = expected_sequence(path, false);
+                assert_eq!(builder.sequence(2 * i), Some(expected_forward), "MutableGBWT should return correct forward sequence for path {} ({})", i, test_case);
+                let expected_reverse = expected_sequence(path, true);
+                assert_eq!(builder.sequence(2 * i + 1), Some(expected_reverse), "MutableGBWT should return correct reverse sequence for path {} ({})", i, test_case);
+            } else {
+                let expected = expected_sequence(path, false);
+                assert_eq!(builder.sequence(i), Some(expected), "MutableGBWT should return correct sequence for path {} ({})", i, test_case);
+            }
+
+            if builder.has_metadata() {
+                assert_eq!(builder.path_name(i), Some(&path_names[i]), "MutableGBWT should return correct path name for path {} ({})", i, test_case);
+            } else {
+                assert_eq!(builder.path_name(i), None, "MutableGBWT should not have path names ({})", test_case);
+            }
+        }
+
+        // Check out-of-bounds queries.
+        assert_eq!(builder.sequence(sequence_count), None, "Extracting sequence with out-of-bounds id should return None ({})", test_case);
+        assert_eq!(builder.path_name(paths.len()), None, "Getting path name with out-of-bounds id should return None ({})", test_case);
+    }
+
+    #[test]
+    fn mutable_gbwt_empty() {
+        for (bidirectional, with_metadata) in [(false, false), (false, true), (true, false), (true, true)] {
+            let test_case = format!(
+                "bidirectional={}, with_metadata={}",
+                bidirectional, with_metadata
+            );
+            let builder = MutableGBWT::new(bidirectional, with_metadata);
+
+            // Check that flags and tags get initialized correctly.
+            assert_eq!(builder.is_bidirectional(), bidirectional, "MutableGBWT should have correct bidirectional flag ({})", test_case);
+            assert_eq!(builder.has_metadata(), with_metadata, "MutableGBWT should have correct metadata flag ({})", test_case);
+            assert_eq!(builder.tags().len(), 1, "MutableGBWT should start with one tag ({})", test_case);
+            let expected_value = String::from(SOURCE_VALUE);
+            assert_eq!(builder.tags().get(SOURCE_KEY), Some(&expected_value), "MutableGBWT should have the correct source tag ({})", test_case);
+
+            check_mutable_gbwt(&builder, &[], &[], &test_case);
+        }
+    }
+
+    fn extract_test_case(gbwt_name: &'static str) -> (Vec<Vec<usize>>, Vec<FullPathName>) {
+        let filename = support::get_test_data(gbwt_name);
+        let index: GBWT = serialize::load_from(&filename).unwrap();
+
+        let mut paths = Vec::new();
+        let mut names = Vec::new();
+        let metadata = index.metadata().unwrap();
+        for path_id in 0..metadata.paths() {
+            let path: Vec<usize> = index.sequence(path_id).unwrap().collect();
+            paths.push(path);
+            names.push(FullPathName::from_metadata(metadata, path_id).unwrap());
+        }
+
+        (paths, names)
+    }
+
+    fn generate_batches<'a>(
+        paths: &[Vec<usize>], path_names: &'a [FullPathName],
+        two_batches: bool, bidirectional: bool, with_metadata: bool
+    ) -> Vec<(Vec<u32>, Option<&'a [FullPathName]>)> {
+        let path_sources = if two_batches {
+            let mid = paths.len() / 2;
+            vec![&paths[..mid], &paths[mid..]]
+        } else {
+            vec![paths]
+        };
+        let name_sources = if with_metadata {
+            if two_batches {
+                let mid = path_names.len() / 2;
+                vec![Some(&path_names[..mid]), Some(&path_names[mid..])]
+            } else {
+                vec![Some(path_names)]
+            }
+        } else {
+            vec![None; path_sources.len()]
+        };
+
+        let mut result = Vec::new();
+        for (&path_source, &name_source) in path_sources.iter().zip(name_sources.iter()) {
+            let mut buffer: Vec<u32> = Vec::new();
+            for path in path_source.iter() {
+                buffer.extend(path.iter().copied().map(|node| node as u32));
+                buffer.push(ENDMARKER as u32);
+                if bidirectional {
+                    let reversed = support::reverse_path(path);
+                    buffer.extend(reversed.iter().copied().map(|node| node as u32));
+                    buffer.push(ENDMARKER as u32);
+                }
+            }
+            result.push((buffer, name_source));
+        }
+
+        result
+    }
+
+    #[test]
+    fn mutable_gbwt_insert() {
+        let (paths, names) = extract_test_case("example.gbwt");
+
+        for (two_batches, bidirectional, with_metadata) in [
+            (false, false, false),
+            (false, false, true),
+            (false, true, false),
+            (false, true, true),
+            (true, false, false),
+            (true, false, true),
+            (true, true, false),
+            (true, true, true),
+        ] {
+            let test_case = format!(
+                "two_batches={}, bidirectional={}, with_metadata={}",
+                two_batches, bidirectional, with_metadata
+            );
+
+            // Build the GBWT and validate it.
+            let batches = generate_batches(&paths, &names, two_batches, bidirectional, with_metadata);
+            let mut builder = MutableGBWT::new(bidirectional, with_metadata);
+            for (i, (buffer, path_names)) in batches.iter().enumerate() {
+                let result = builder.insert(buffer, *path_names);
+                assert!(result.is_ok(), "Builder failed with batch {} ({})", i, test_case);
+            }
+            check_mutable_gbwt(&builder, &paths, &names, &test_case);
+        }
+    }
 }
 
 //-----------------------------------------------------------------------------

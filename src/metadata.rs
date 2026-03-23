@@ -362,6 +362,8 @@ impl From<MetadataBuilder> for Metadata {
         header.set(MetadataPayload::FLAG_SAMPLE_NAMES);
         header.set(MetadataPayload::FLAG_CONTIG_NAMES);
 
+        // The panics in sample / contig name conversions should be unreachable.
+        // The conversion can only fail if there are duplicate names, but the builder should prevent that.
         let path_names = builder.path_names;
         let sample_names = Dictionary::try_from(builder.sample_names).unwrap_or_else(|_|
             panic!("Metadata: Inconsistent sample names in MetadataBuilder")
