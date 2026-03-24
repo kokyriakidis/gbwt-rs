@@ -16,7 +16,7 @@ use crate::{ENDMARKER, SOURCE_KEY, SOURCE_VALUE};
 use crate::{GBWT, Pos, FullPathName, Metadata, MetadataBuilder};
 use crate::bwt::{BWT, BWTBuilder, SmallPos};
 use crate::headers::{Header, GBWTPayload};
-use crate::support::{SmallRun, Tags, EdgeList};
+use crate::support::{Run, SmallRun, Tags, EdgeList};
 
 use std::collections::BTreeMap;
 
@@ -399,10 +399,7 @@ impl MutableGBWT {
                 if names.len() != expected {
                     return Err(format!("MutableGBWT: Expected {} path names, got {}", expected, names.len()));
                 }
-                for path_name in names.iter() {
-                    // FIXME: insert all at once. otherwise we may modify the metadata before we get an error
-                    metadata.insert(path_name)?;
-                }
+                metadata.extend(names)?;
                 Ok(())
             }
             (None, Some(_)) => Err(String::from("MutableGBWT: Path names provided for a GBWT without metadata")),
@@ -570,8 +567,10 @@ impl MutableGBWT {
     ///
     /// Does not modify the GBWT if an error is returned.
     pub fn insert(&mut self, buffer: &[u32], names: Option<&[FullPathName]>) -> Result<(), String> {
+        // Only these steps may fail, and the failure happens before we actually modify the metadata.
         let mut sequences = self.sequences_in_buffer(buffer)?;
         self.append_metadata(sequences.len(), names)?;
+
         self.append_sequence_starts(&mut sequences);
         let mut active_sequences = self.sort_sequences(&mut sequences);
         self.advance_sequences(active_sequences, 0);
@@ -580,7 +579,7 @@ impl MutableGBWT {
         // Invariants:
         // * GBWT position `curr` corresponds to `nodes[curr_offset]`.
         // * The sequences are sorted by `curr`.
-        // * `nodes[0..curr_offset]` have been inserted into the BWTs.
+        // * `nodes[0..=curr_offset]` have been inserted into the BWTs.
         // * `next.node` (`nodes[curr_offset + 1]`) should be inserted to BWT offset `curr.offset` in the record for `curr.node`.
         let mut curr_offset = 0;
         while !active_sequences.is_empty() {
@@ -596,10 +595,8 @@ impl MutableGBWT {
     }
 }
 
-impl TryFrom<MutableGBWT> for GBWT {
-    type Error = String;
-
-    fn try_from(builder: MutableGBWT) -> Result<Self, String> {
+impl From<MutableGBWT> for GBWT {
+    fn from(builder: MutableGBWT) -> Self {
         // Header and tags.
         let mut header = Header::<GBWTPayload>::default();
         if builder.bidirectional {
@@ -620,19 +617,24 @@ impl TryFrom<MutableGBWT> for GBWT {
             header.payload_mut().alphabet_size = 1;
         }
 
-        // BWT and endmarker.
+        // Encode the BWT, including the endmarker record.
         let mut bwt_builder = BWTBuilder::new(&builder.endmarker_edges, &builder.endmarker);
-        // FIXME: encode the rest, including empty nodes
-        let bwt = BWT::from(bwt_builder);
+        for node_id in (header.payload().offset + 1)..header.payload().alphabet_size {
+            if let Some(record) = builder.records.get(&node_id) {
+                bwt_builder.append(&record.outgoing, record.bwt.iter().map(|&run| Run::from(run)));
+            } else {
+                bwt_builder.append_empty();
+            }
+        }
 
-        Ok(GBWT {
+        GBWT {
             header,
             tags: builder.tags,
-            bwt,
+            bwt: BWT::from(bwt_builder),
             endmarker: builder.endmarker,
             da_samples: Vec::new(),
             metadata: builder.metadata.map(Metadata::from),
-        })
+        }
     }
 }
 

@@ -316,7 +316,7 @@ fn metadata_builder_empty() {
 }
 
 #[test]
-fn metadata_builder() {
+fn metadata_builder_insert() {
     let truth = create_metadata(true, true, true);
 
     let mut builder = MetadataBuilder::new();
@@ -340,7 +340,7 @@ fn metadata_builder() {
 }
 
 #[test]
-fn metadata_builder_duplicates() {
+fn metadata_builder_insert_duplicates() {
     let truth = create_metadata(true, true, true);
 
     let mut builder = MetadataBuilder::new();
@@ -351,8 +351,62 @@ fn metadata_builder_duplicates() {
         let result = builder.insert(&full_path_name);
         assert!(result.is_err(), "Expected an error when inserting a duplicate path name {} to the builder", path_id);
     }
-    let metadata = Metadata::from(builder);
 
+    // Compare the result against the truth.
+    let metadata = Metadata::from(builder);
+    compare_full_metadata(&metadata, &truth);
+}
+
+#[test]
+fn metadata_builder_extend() {
+    let truth = create_metadata(true, true, true);
+    let path_names: Vec<FullPathName> = (0..truth.paths()).map(|path_id|
+        FullPathName::from_metadata(&truth, path_id).unwrap()
+    ).collect();
+
+    let mut builder = MetadataBuilder::new();
+    let result = builder.extend(&path_names);
+    assert!(result.is_ok(), "Failed to extend builder with path names: {}", result.err().unwrap());
+
+    // Compare the result against the truth.
+    let metadata = Metadata::from(builder);
+    compare_full_metadata(&metadata, &truth);
+}
+
+#[test]
+fn metadata_builder_extend_twice() {
+    let truth = create_metadata(true, true, true);
+    let path_names: Vec<FullPathName> = (0..truth.paths()).map(|path_id|
+        FullPathName::from_metadata(&truth, path_id).unwrap()
+    ).collect();
+
+    let mut builder = MetadataBuilder::new();
+    let mid = path_names.len() / 2;
+    let result = builder.extend(&path_names[..mid]);
+    assert!(result.is_ok(), "Failed to extend builder with the first half of the path names: {}", result.err().unwrap());
+    let result = builder.extend(&path_names[mid..]);
+    assert!(result.is_ok(), "Failed to extend builder with the second half of the path names: {}", result.err().unwrap());
+
+    // Compare the result against the truth.
+    let metadata = Metadata::from(builder);
+    compare_full_metadata(&metadata, &truth);
+}
+
+#[test]
+fn metadata_builder_extend_duplicates() {
+    let truth = create_metadata(true, true, true);
+    let path_names: Vec<FullPathName> = (0..truth.paths()).map(|path_id|
+        FullPathName::from_metadata(&truth, path_id).unwrap()
+    ).collect();
+
+    let mut builder = MetadataBuilder::new();
+    let result = builder.extend(&path_names);
+    assert!(result.is_ok(), "Failed to extend builder with path names: {}", result.err().unwrap());
+    let result = builder.extend(&path_names);
+    assert!(result.is_err(), "Expected an error when extending builder with duplicate path names");
+
+    // Compare the result against the truth.
+    let metadata = Metadata::from(builder);
     compare_full_metadata(&metadata, &truth);
 }
 

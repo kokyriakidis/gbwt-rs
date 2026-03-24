@@ -579,6 +579,27 @@ impl MetadataBuilder {
         MetadataBuilder::default()
     }
 
+    // Returns the identifier of the given sample name.
+    fn sample_id(&self, name: &FullPathName) -> usize {
+        *self.sample_set.get(&name.sample).unwrap_or(&self.sample_set.len())
+    }
+
+    // Returns the identifier of the given contig name.
+    fn contig_id(&self, name: &FullPathName) -> usize {
+        *self.contig_set.get(&name.contig).unwrap_or(&self.contig_set.len())
+    }
+
+    // Returns the identifier of the given name in the union of two name sets.
+    // Identifiers in `first` come before identifiers in `second`.
+    // If the name is not present, returns the new identifier that would be assigned to the name if it were added to `second`.
+    fn joint_id(first: &HashMap<String, usize>, second: &HashMap<String, usize>, name: &String) -> usize {
+        if let Some(id) = first.get(name) {
+            *id
+        } else {
+            *second.get(name).unwrap_or(&(first.len() + second.len()))
+        }
+    }
+
     /// Inserts a path name to the builder.
     ///
     /// # Errors
@@ -586,24 +607,65 @@ impl MetadataBuilder {
     /// Returns an error if the path name is a duplicate of an already inserted path name.
     /// If an error occurs, the builder is not modified.
     pub fn insert(&mut self, name: &FullPathName) -> Result<(), String> {
-        let sample_id = self.sample_set.get(&name.sample).cloned().unwrap_or(self.sample_names.len());
-        let contig_id = self.contig_set.get(&name.contig).cloned().unwrap_or(self.contig_names.len());
+        let sample_id = self.sample_id(name);
+        let contig_id = self.contig_id(name);
         let path_name = PathName::from_fields(sample_id, contig_id, name.haplotype, name.fragment);
         if self.path_set.contains(&path_name) {
             return Err(format!("MetadataBuilder: Duplicate path name {}", name));
         }
 
-        if sample_id == self.sample_names.len() {
+        if sample_id == self.sample_set.len() {
             self.sample_names.push(name.sample.clone());
             self.sample_set.insert(name.sample.clone(), sample_id);
         }
-        if contig_id == self.contig_names.len() {
+        if contig_id == self.contig_set.len() {
             self.contig_names.push(name.contig.clone());
             self.contig_set.insert(name.contig.clone(), contig_id);
         }
         self.path_names.push(path_name);
         self.path_set.insert(path_name);
         self.haplotypes.insert((sample_id, name.haplotype));
+
+        Ok(())
+    }
+
+    /// Appends a slice of path names to the builder.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there are duplicate path names in the input or between the input and the existing path names.
+    /// If an error occurs, the builder is not modified.
+    pub fn extend(&mut self, names: &[FullPathName]) -> Result<(), String> {
+        // Build the extension in a separate builder.
+        let mut extension = MetadataBuilder::new();
+        for name in names {
+            let sample_id = Self::joint_id(&self.sample_set, &extension.sample_set, &name.sample);
+            if sample_id >= self.sample_set.len() + extension.sample_set.len() {
+                extension.sample_names.push(name.sample.clone());
+                extension.sample_set.insert(name.sample.clone(), sample_id);
+            }
+            let contig_id = Self::joint_id(&self.contig_set, &extension.contig_set, &name.contig);
+            if contig_id >= self.contig_set.len() + extension.contig_set.len() {
+                extension.contig_names.push(name.contig.clone());
+                extension.contig_set.insert(name.contig.clone(), contig_id);
+            }
+            let path_name = PathName::from_fields(sample_id, contig_id, name.haplotype, name.fragment);
+            if self.path_set.contains(&path_name) || extension.path_set.contains(&path_name) {
+                return Err(format!("MetadataBuilder: Duplicate path name {}", name));
+            }
+            extension.path_names.push(path_name);
+            extension.path_set.insert(path_name);
+            extension.haplotypes.insert((sample_id, name.haplotype));
+        }
+
+        // Append the extension to the builder.
+        self.sample_names.extend(extension.sample_names);
+        self.sample_set.extend(extension.sample_set);
+        self.contig_names.extend(extension.contig_names);
+        self.contig_set.extend(extension.contig_set);
+        self.path_names.extend(extension.path_names);
+        self.path_set.extend(extension.path_set);
+        self.haplotypes.extend(extension.haplotypes);
 
         Ok(())
     }

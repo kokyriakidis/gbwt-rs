@@ -356,6 +356,12 @@ impl BWTBuilder {
             self.encoder.write(run);
         }
     }
+
+    /// Appends an empty record to the BWT.
+    pub fn append_empty(&mut self) {
+        self.offsets.push(self.encoder.len());
+        self.encoder.write_int(0);
+    }
 }
 
 //-----------------------------------------------------------------------------
