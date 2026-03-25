@@ -3,6 +3,8 @@
 ## GBZ 0.5.1 (2026-02-13)
 
 * Convert between internal and vg conventions for generic path names when (de)serializing metadata.
+* GBWT construction:
+  * Insert batches of sequences into `MutableGBWT` and convert it to `GBWT`.
 
 ## GBZ 0.5.0 (2026-02-12)
 

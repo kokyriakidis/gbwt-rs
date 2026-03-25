@@ -209,7 +209,7 @@ impl RunBuilder {
 /// # Examples
 ///
 /// ```
-/// use gbz::{MutableGBWT, ENDMARKER};
+/// use gbz::{GBWT, MutableGBWT, ENDMARKER};
 ///
 /// // Unidirectional GBWT with no metadata.
 /// let mut builder = MutableGBWT::new(false, false);
@@ -229,9 +229,18 @@ impl RunBuilder {
 /// builder.insert(&buffer, None).expect("Failed to insert sequences");
 ///
 /// assert_eq!(builder.len(), 16);
-/// assert_eq!(builder.sequence_count(), 4);
-/// assert_eq!(builder.node_count(), 6);
+/// assert_eq!(builder.sequences(), 4);
+/// assert_eq!(builder.nodes(), 6);
 /// assert_eq!(builder.sequence(2), Some(vec![1, 4, 5]));
+///
+/// // Convert to GBWT.
+/// let gbwt = GBWT::from(builder);
+/// assert_eq!(gbwt.len(), 16);
+/// assert_eq!(gbwt.sequences(), 4);
+/// let iter = gbwt.sequence(2);
+/// assert!(iter.is_some());
+/// let sequence: Vec<usize> = iter.unwrap().collect();
+/// assert_eq!(sequence, vec![1, 4, 5]);
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MutableGBWT {
@@ -274,7 +283,7 @@ impl MutableGBWT {
     }
 
     /// Returns the total number of nodes, excluding the endmarker.
-    pub fn node_count(&self) -> usize {
+    pub fn nodes(&self) -> usize {
         self.records.len()
     }
 
@@ -289,12 +298,12 @@ impl MutableGBWT {
     }
 
     /// Returns the total number of sequences.
-    pub fn sequence_count(&self) -> usize {
+    pub fn sequences(&self) -> usize {
         self.endmarker.len()
     }
 
     /// Returns the total number of paths.
-    pub fn path_count(&self) -> usize {
+    pub fn paths(&self) -> usize {
         if self.bidirectional {
             self.endmarker.len() / 2
         } else {
@@ -555,7 +564,7 @@ impl MutableGBWT {
     /// If the GBWT contains metadata, path names must be provided.
     /// Each name corresponds to a sequence (in unidirectional GBWT) or a pair of sequences (in bidirectional GBWT).
     ///
-    /// The newly inserted sequences receive sequence and path identifiers starting from [`Self::sequence_count()`] and [`Self::path_count()`], respectively.
+    /// The newly inserted sequences receive sequence and path identifiers starting from [`Self::sequences()`] and [`Self::paths()`], respectively.
     ///
     /// # Errors
     ///
@@ -605,7 +614,7 @@ impl From<MutableGBWT> for GBWT {
         if builder.has_metadata() {
             header.set(GBWTPayload::FLAG_METADATA);
         }
-        header.payload_mut().sequences = builder.sequence_count();
+        header.payload_mut().sequences = builder.sequences();
         header.payload_mut().size = builder.len();
         if let Some(min_node) = builder.min_node() {
             header.payload_mut().offset = min_node - 1;
@@ -644,6 +653,7 @@ impl From<MutableGBWT> for GBWT {
 mod tests {
     use super::*;
 
+    use crate::Orientation;
     use crate::support;
     use simple_sds::serialize;
     use std::collections::HashSet;
@@ -861,12 +871,17 @@ mod tests {
         }
     }
 
-    // This assumes that the flags in the builder are correct.
-    fn check_mutable_gbwt(builder: &MutableGBWT, paths: &[Vec<usize>], path_names: &[FullPathName], test_case: &str) {
-        let mut len: usize = paths.iter().map(|path| path.len() + 1).sum();
-        if builder.is_bidirectional() {
+    fn total_length(paths: &[Vec<usize>], bidirectional: bool) -> usize {
+        let mut len = paths.iter().map(|path| path.len() + 1).sum();
+        if bidirectional {
             len *= 2;
         }
+        len
+    }
+
+    // This assumes that the flags in the builder are correct.
+    fn check_mutable_gbwt(builder: &MutableGBWT, paths: &[Vec<usize>], path_names: &[FullPathName], test_case: &str) {
+        let len = total_length(paths, builder.is_bidirectional());
         assert_eq!(builder.len(), len, "MutableGBWT should have correct length ({})", test_case);
 
         let mut nodes: HashSet<usize> = HashSet::new();
@@ -878,11 +893,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(builder.node_count(), nodes.len(), "MutableGBWT should have correct node count ({})", test_case);
+        assert_eq!(builder.nodes(), nodes.len(), "MutableGBWT should have correct node count ({})", test_case);
 
         let sequence_count = if builder.is_bidirectional() { paths.len() * 2 } else { paths.len() };
-        assert_eq!(builder.sequence_count(), sequence_count, "MutableGBWT should have correct sequence count ({})", test_case);
-        assert_eq!(builder.path_count(), paths.len(), "MutableGBWT should have correct path count ({})", test_case);
+        assert_eq!(builder.sequences(), sequence_count, "MutableGBWT should have correct sequence count ({})", test_case);
+        assert_eq!(builder.paths(), paths.len(), "MutableGBWT should have correct path count ({})", test_case);
 
         // Check sequences and path names.
         for (i, path) in paths.iter().enumerate() {
@@ -909,6 +924,55 @@ mod tests {
         assert_eq!(builder.path_name(paths.len()), None, "Getting path name with out-of-bounds id should return None ({})", test_case);
     }
 
+    fn check_built_gbwt(
+        index: &GBWT,
+        paths: &[Vec<usize>], path_names: &[FullPathName],
+        bidirectional: bool, with_metadata: bool,test_case: &str
+    ) {
+        // We need to check separately that the flags survived the conversion.
+        assert_eq!(index.is_bidirectional(), bidirectional, "GBWT should have correct bidirectional flag ({})", test_case);
+        assert_eq!(index.has_metadata(), with_metadata, "GBWT should have correct metadata flag ({})", test_case);
+        let metadata = index.metadata();
+
+        let len = total_length(paths, index.is_bidirectional());
+        assert_eq!(index.len(), len, "GBWT should have correct length ({})", test_case);
+
+        let sequence_count = if index.is_bidirectional() { paths.len() * 2 } else { paths.len() };
+        assert_eq!(index.sequences(), sequence_count, "GBWT should have correct sequence count ({})", test_case);
+
+        // Check sequences and path names.
+        for (i, path) in paths.iter().enumerate() {
+            if index.is_bidirectional() {
+                let fw_iter = index.sequence(support::encode_path(i, Orientation::Forward));
+                assert!(fw_iter.is_some(), "GBWT should return Some for forward sequence of path {} ({})", i, test_case);
+                let fw_sequence: Vec<usize> = fw_iter.unwrap().collect();
+                assert_eq!(&fw_sequence, path, "GBWT should return correct forward sequence for path {} ({})", i, test_case);
+                let rev_iter = index.sequence(support::encode_path(i, Orientation::Reverse));
+                assert!(rev_iter.is_some(), "GBWT should return Some for reverse sequence of path {} ({})", i, test_case);
+                let rev_sequence: Vec<usize> = rev_iter.unwrap().collect();
+                let expected_reverse = support::reverse_path(path);
+                assert_eq!(rev_sequence, expected_reverse, "GBWT should return correct reverse sequence for path {} ({})", i, test_case);
+            } else {
+                let fw_iter = index.sequence(i);
+                assert!(fw_iter.is_some(), "GBWT should return Some for sequence of path {} ({})", i, test_case);
+                let fw_sequence: Vec<usize> = fw_iter.unwrap().collect();
+                assert_eq!(&fw_sequence, path, "GBWT should return correct sequence for path {} ({})", i, test_case);
+            }
+
+            if let Some(metadata) = metadata {
+                let path_name = FullPathName::from_metadata(metadata, i);
+                let expected_name = path_names[i].clone();
+                assert_eq!(path_name, Some(expected_name), "GBWT should return correct path name for path {} ({})", i, test_case);
+            }
+        }
+
+        // Check out-of-bounds queries.
+        assert!(index.sequence(sequence_count).is_none(), "Extracting sequence with out-of-bounds id should return None ({})", test_case);
+        if let Some(metadata) = metadata {
+            assert!(FullPathName::from_metadata(metadata, paths.len()).is_none(), "Getting path name with out-of-bounds id should return None ({})", test_case);
+        }
+    }
+
     #[test]
     fn mutable_gbwt_empty() {
         for (bidirectional, with_metadata) in [(false, false), (false, true), (true, false), (true, true)] {
@@ -926,6 +990,8 @@ mod tests {
             assert_eq!(builder.tags().get(SOURCE_KEY), Some(&expected_value), "MutableGBWT should have the correct source tag ({})", test_case);
 
             check_mutable_gbwt(&builder, &[], &[], &test_case);
+            let index = GBWT::from(builder);
+            check_built_gbwt(&index, &[], &[], bidirectional, with_metadata, &test_case);
         }
     }
 
@@ -1011,6 +1077,8 @@ mod tests {
                 assert!(result.is_ok(), "Builder failed with batch {} ({})", i, test_case);
             }
             check_mutable_gbwt(&builder, &paths, &names, &test_case);
+            let index = GBWT::from(builder);
+            check_built_gbwt(&index, &paths, &names, bidirectional, with_metadata, &test_case);
         }
     }
 }

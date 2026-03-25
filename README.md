@@ -12,6 +12,7 @@ It is based on the [Simple-SDS](https://github.com/jltsiren/simple-sds) library.
 - [x] Unidirectional search
 - [x] Bidirectional search
 - [x] Metadata
+- [x] Construction
 - [ ] Locate queries
 
 ### GBWTGraph / GBZ
@@ -24,7 +25,6 @@ It is based on the [Simple-SDS](https://github.com/jltsiren/simple-sds) library.
 
 ### Possible future extensions
 
-* GBWT construction
 * GBWT/GBZ merging
 * Cached GBWT
 
