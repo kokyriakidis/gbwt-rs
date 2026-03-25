@@ -1,8 +1,13 @@
-//! GBWT construction.
+//! [`GBWT`] construction.
 //!
 //! Like the C++ implementation, the construction algorithm uses 32-bit integers internally to save space.
 //! This limits the maximum node identifier and the number of visits to a node to approximately [`u32::MAX`].
 //! The interface uses [`usize`], as it is the semantically correct type and also used in the rest of the codebase.
+//!
+//! [`MutableGBWT`] provides a way of building [`GBWT`] incrementally by inserting batches of sequences.
+//! [`GBWTBuilder`] is a more convenient wrapper for [`MutableGBWT`].
+//! The user can choose whether to build a bidirectional GBWT and then insert paths one by one.
+//! The builder buffers the inserted paths and does actual construction in a background thread.
 //!
 //! The construction algorithm is based on the BCR algorithm:
 //!
@@ -10,26 +15,186 @@
 //! > **Lightweight algorithms for constructing and inverting the BWT of string collections**.\
 //! > Theoretical Computer Science 483:134–148, 2013.
 //! > DOI: [10.1016/j.tcs.2012.02.002](https://doi.org/10.1016/j.tcs.2012.02.002)
-// FIXME: refer to GBWTBuilder, MutableGBWT
 
 use crate::{ENDMARKER, SOURCE_KEY, SOURCE_VALUE};
 use crate::{GBWT, Pos, FullPathName, Metadata, MetadataBuilder};
 use crate::bwt::{BWT, BWTBuilder, SmallPos};
 use crate::headers::{Header, GBWTPayload};
-use crate::support::{Run, SmallRun, Tags, EdgeList};
+use crate::support::{self, Run, SmallRun, Tags, EdgeList};
 
 use std::collections::BTreeMap;
+use std::sync::mpsc::{Sender, Receiver};
+use std::thread::JoinHandle;
 
 //-----------------------------------------------------------------------------
 
-// FIXME: builder itself
-// Construction has three parameters: bidirectional, metadata, buffer size
-// There is a background thread that contains a MutableGBWT
-// When the buffer gets full, the main thread sends the paths (and the metadata) to the background thread
-// When the construction is finished, the main thread sends the remaining buffer, followed by an empty buffer to signal the end of construction
-// The background thread inserts each batch into the MutableGBWT
-// When it receives the end signal, it converts the MutableGBWT into GBWT and sends it back
-// Communication between threads uses channels
+// FIXME: tests
+/// A builder for constructing [`GBWT`] incrementally.
+///
+/// The user can insert paths one by one using [`Self::insert`].
+/// Each path will be converted into one or two sequences, depending on whether the builder is bidirectional.
+/// When building a GBWT with metadata, each path must be accompanied by a name.
+///
+/// The builder inserts the paths into buffers.
+/// Once the buffers become full, they are sent to a background thread that inserts them into a [`MutableGBWT`].
+/// Construction finishes when the user calls [`Self::build`], which also flushes any remaining data in the buffers.
+///
+/// # Examples
+///
+/// ```
+/// use gbz::{GBWTBuilder, Orientation};
+/// use gbz::support;
+///
+/// // Build a bidirectional GBWT without metadata, with a buffer capacity of 20 nodes.
+/// // We ignore the error messages for simplicity.
+/// let mut builder = GBWTBuilder::new(true, false, 20);
+/// builder.insert(&[2, 6, 10], None).expect("Failed to insert path");
+/// builder.insert(&[4, 8, 12], None).expect("Failed to insert path");
+/// builder.insert(&[2, 8, 10], None).expect("Failed to insert path");
+/// builder.insert(&[4, 6, 12], None).expect("Failed to insert path");
+/// let mut gbwt = builder.build().expect("Failed to build GBWT");
+///
+/// assert!(gbwt.is_bidirectional());
+/// assert_eq!(gbwt.len(), 32);
+/// assert_eq!(gbwt.sequences(), 8);
+///
+/// // We get the reverse complement of the third path (id 2).
+/// let iter = gbwt.sequence(support::encode_path(2, Orientation::Reverse));
+/// assert!(iter.is_some());
+/// let sequence: Vec<usize> = iter.unwrap().collect();
+/// assert_eq!(sequence, &[11, 9, 3]);
+/// ```
+pub struct GBWTBuilder {
+    // Are we building a bidirectional GBWT?
+    bidirectional: bool,
+    // `sequence_buffer` is not allowed to exceed this size, unless a single path needs more space.
+    buffer_capacity: usize,
+    // Buffer for concatenated sequences.
+    seq_buffer: Vec<u32>,
+    // Buffer for path names, if we are building a GBWT with path metadata.
+    name_buffer: Option<Vec<FullPathName>>,
+    // Construction thread that runs in the background.
+    construction_thread: JoinHandle<Result<GBWT, String>>,
+    // Channel for sending buffers to the construction thread.
+    to_construction: Sender<(Vec<u32>, Option<Vec<FullPathName>>)>,
+}
+
+fn build_gbwt(bidirectional: bool, with_metadata: bool, receiver: Receiver<(Vec<u32>, Option<Vec<FullPathName>>)>)
+    -> Result<GBWT, String>
+{
+    let mut builder = MutableGBWT::new(bidirectional, with_metadata);
+    let mut error = None;
+    while let Ok((seq_buffer, name_buffer)) = receiver.recv() {
+        if seq_buffer.is_empty() {
+            break;
+        }
+        if error.is_some() {
+            continue;
+        }
+        // If we have a construction error, we store it and ignore subsequent batches
+        // to avoid blocking the main thread.
+        if let Err(e) = builder.insert(&seq_buffer, name_buffer.as_deref()) {
+            error = Some(e);
+        }
+    }
+    if let Some(e) = error {
+        return Err(e);
+    }
+    Ok(GBWT::from(builder))
+}
+
+impl GBWTBuilder {
+    /// Creates a new builder.
+    ///
+    /// # Arguments
+    ///
+    /// * `bidirectional`: Are we building a bidirectional GBWT?
+    /// * `with_metadata`: Are we building a GBWT with path metadata?
+    /// * `buffer_capacity`: Total length of a batch of sequences, including endmarkers, in nodes.
+    ///   This will increase automatically if a single path exceeds the capacity.
+    pub fn new(bidirectional: bool, with_metadata: bool, buffer_capacity: usize) -> Self {
+        let (to_construction, receiver) = std::sync::mpsc::channel();
+        let construction_thread = std::thread::spawn(move || build_gbwt(bidirectional, with_metadata, receiver));
+        Self {
+            bidirectional,
+            buffer_capacity,
+            seq_buffer: Vec::with_capacity(buffer_capacity),
+            name_buffer: if with_metadata { Some(Vec::new()) } else { None },
+            construction_thread,
+            to_construction,
+        }
+    }
+
+    fn flush_buffers(&mut self) {
+        if self.seq_buffer.is_empty() {
+            return;
+        }
+        let with_metadata = self.name_buffer.is_some();
+        let seq_buffer = std::mem::replace(&mut self.seq_buffer, Vec::with_capacity(self.buffer_capacity));
+        let name_buffer = if with_metadata {
+            Some(std::mem::replace(self.name_buffer.as_mut().unwrap(), Vec::new()))
+        } else {
+            None
+        };
+        let _ = self.to_construction.send((seq_buffer, name_buffer));
+    }
+
+    /// Inserts a new path into the builder.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path contains an endmarker value ([`ENDMARKER`]).
+    /// Returns an error if no path name was provided to a builder with metadata, or if a path name was provided to a builder without metadata.
+    pub fn insert(&mut self, path: &[u32], name: Option<FullPathName>) -> Result<(), String> {
+        if path.iter().any(|&node| node == ENDMARKER as u32) {
+            return Err(String::from("GBWTBuilder: Path contains endmarker"));
+        }
+        if name.is_some() != self.name_buffer.is_some() {
+            return Err(String::from("GBWTBuilder: Path names must be provided iff the builder is configured to have metadata"));
+        }
+
+        // Flush the buffers if we cannot fit the new path.
+        let mut space_needed = path.len() + 1;
+        if self.bidirectional {
+            space_needed *= 2;
+        }
+        if self.seq_buffer.len() + space_needed > self.buffer_capacity {
+            if space_needed > self.buffer_capacity {
+                // Grow the buffer to fit the path.
+                self.buffer_capacity = space_needed;
+            }
+            self.flush_buffers();
+        }
+
+        // Insert the path and the name into the buffers. If the buffers become
+        // full, the next `insert` or `build` call will flush them. We do not
+        // flush them here to avoid blocking the main thread if the construction
+        // thread is busy.
+        self.seq_buffer.extend_from_slice(path);
+        self.seq_buffer.push(ENDMARKER as u32);
+        if self.bidirectional {
+            support::reverse_path_into(path, &mut self.seq_buffer);
+            self.seq_buffer.push(ENDMARKER as u32);
+        }
+
+        Ok(())
+    }
+
+    /// Finishes the construction and returns the built GBWT.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error the construction thread encountered, if any.
+    pub fn build(self) -> Result<GBWT, String> {
+        // Flush any remaining paths in the buffers, and send an empty buffer to signal the end of construction.
+        let mut builder = self;
+        builder.flush_buffers();
+        let _ = builder.to_construction.send((Vec::new(), None));
+
+        // Wait for the construction thread to finish and return the result.
+        builder.construction_thread.join().unwrap_or_else(|_| Err(String::from("GBWTBuilder: Construction thread panicked")))
+    }
+}
 
 //-----------------------------------------------------------------------------
 
@@ -209,7 +374,8 @@ impl RunBuilder {
 /// # Examples
 ///
 /// ```
-/// use gbz::{GBWT, MutableGBWT, ENDMARKER};
+/// use gbz::{GBWT, ENDMARKER};
+/// use gbz::gbwt::builder::MutableGBWT;
 ///
 /// // Unidirectional GBWT with no metadata.
 /// let mut builder = MutableGBWT::new(false, false);
@@ -978,18 +1144,18 @@ mod tests {
             // The index was built with different options.
             return;
         }
-            let headers_match = index.header == truth.header;
-            assert!(headers_match, "GBWT headers should match ({})", test_case);
-            let tags_match = index.tags == truth.tags;
-            assert!(tags_match, "GBWT tags should match ({})", test_case);
-            let bwts_match = index.bwt == truth.bwt;
-            assert!(bwts_match, "GBWT BWTs should match ({})", test_case);
-            let endmarkers_match = index.endmarker == truth.endmarker;
-            // The endmarker in the built GBWT was built independently, while the one in the original was derived from BWT.
-            assert!(endmarkers_match, "GBWT endmarker records should match ({})", test_case);
-            // The original contains opaque DA samples data built with the C++ implementation.
-            let metadata_match = index.metadata == truth.metadata;
-            assert!(metadata_match, "GBWT metadata should match ({})", test_case);
+        let headers_match = index.header == truth.header;
+        assert!(headers_match, "GBWT headers should match ({})", test_case);
+        let tags_match = index.tags == truth.tags;
+        assert!(tags_match, "GBWT tags should match ({})", test_case);
+        let bwts_match = index.bwt == truth.bwt;
+        assert!(bwts_match, "GBWT BWTs should match ({})", test_case);
+        let endmarkers_match = index.endmarker == truth.endmarker;
+        // The endmarker in the built GBWT was built independently, while the one in the original was derived from BWT.
+        assert!(endmarkers_match, "GBWT endmarker records should match ({})", test_case);
+        // The original contains opaque DA samples data built with the C++ implementation.
+        let metadata_match = index.metadata == truth.metadata;
+        assert!(metadata_match, "GBWT metadata should match ({})", test_case);
     }
 
     #[test]

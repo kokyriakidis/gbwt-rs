@@ -6,9 +6,8 @@
 //! > Bioinformatics, 2020.
 //! > DOI: [10.1093/bioinformatics/btz575](https://doi.org/10.1093/bioinformatics/btz575)
 //!
-//! At the moment, this implementation only supports GBWT indexes built with other tools.
-//! See also the original [C++ implementation](https://github.com/jltsiren/gbwt).
-// FIXME: construction
+//! This implementation includes basic GBWT construction using [`crate::GBWTBuilder`].
+//! For other construction options, see the original [C++ implementation](https://github.com/jltsiren/gbwt).
 
 use crate::{ENDMARKER, SOURCE_KEY, SOURCE_VALUE};
 use crate::{Orientation, Pos, Metadata};

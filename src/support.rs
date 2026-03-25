@@ -352,7 +352,7 @@ pub fn encoded_path_is_canonical(path: &[usize]) -> bool {
 ///
 /// The path is assumed to be a sequence of GBWT node identifiers.
 /// A reverse path visits the other orientation of each node in reverse order.
-/// See also [`reverse_path_in_place`].
+/// See also [`reverse_path_in_place`] and [`reverse_path_into`].
 pub fn reverse_path(path: &[usize]) -> Vec<usize> {
     let mut result: Vec<usize> = path.iter().map(|x| flip_node(*x)).collect();
     result.reverse();
@@ -363,11 +363,24 @@ pub fn reverse_path(path: &[usize]) -> Vec<usize> {
 ///
 /// The path is assumed to be a sequence of GBWT node identifiers.
 /// A reverse path visits the other orientation of each node in reverse order.
-/// See also [`reverse_path`].
+/// See also [`reverse_path`] and [`reverse_path_into`].
 pub fn reverse_path_in_place(path: &mut [usize]) {
     path.reverse();
     for node in path.iter_mut() {
         *node = flip_node(*node);
+    }
+}
+
+// FIXME: test
+/// Inserts the reversed path into the given buffer.
+///
+/// This version uses 32-bit node identifiers to save space during GBWT construction.
+/// The path is assumed to be a sequence of GBWT node identifiers.
+/// A reverse path visits the other orientation of each node in reverse order.
+/// See also [`reverse_path`] and [`reverse_path_in_place`].
+pub fn reverse_path_into(path: &[u32], buffer: &mut Vec<u32>) {
+    for node in path.iter().rev() {
+        buffer.push(flip_node(*node as usize) as u32);
     }
 }
 

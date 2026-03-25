@@ -262,10 +262,9 @@ impl From<BWTBuilder> for BWT {
 
 //-----------------------------------------------------------------------------
 
-// FIXME: no longer only for testing
 /// A structure for building the BWT by appending node records.
 ///
-/// This is mostly intended for testing at the moment, as no BWT construction algorithms have been implemented.
+/// This is mostly intended to be used inside [`crate::gbwt::builder::MutableGBWT`].
 /// See module-level documentation for an example.
 #[derive(Clone, Debug)]
 pub struct BWTBuilder {
