@@ -28,7 +28,6 @@ use std::thread::JoinHandle;
 
 //-----------------------------------------------------------------------------
 
-// FIXME: tests
 /// A builder for constructing [`GBWT`] incrementally.
 ///
 /// The user can insert paths one by one using [`Self::insert`].
@@ -68,7 +67,7 @@ pub struct GBWTBuilder {
     // Are we building a bidirectional GBWT?
     bidirectional: bool,
     // `sequence_buffer` is not allowed to exceed this size, unless a single path needs more space.
-    buffer_capacity: usize,
+    buffer_size: usize,
     // Buffer for concatenated sequences.
     seq_buffer: Vec<u32>,
     // Buffer for path names, if we are building a GBWT with path metadata.
@@ -110,15 +109,15 @@ impl GBWTBuilder {
     ///
     /// * `bidirectional`: Are we building a bidirectional GBWT?
     /// * `with_metadata`: Are we building a GBWT with path metadata?
-    /// * `buffer_capacity`: Total length of a batch of sequences, including endmarkers, in nodes.
+    /// * `buffer_size`: Total length of a batch of sequences, including endmarkers, in nodes.
     ///   This will increase automatically if a single path exceeds the capacity.
-    pub fn new(bidirectional: bool, with_metadata: bool, buffer_capacity: usize) -> Self {
+    pub fn new(bidirectional: bool, with_metadata: bool, buffer_size: usize) -> Self {
         let (to_construction, receiver) = std::sync::mpsc::channel();
         let construction_thread = std::thread::spawn(move || build_gbwt(bidirectional, with_metadata, receiver));
         Self {
             bidirectional,
-            buffer_capacity,
-            seq_buffer: Vec::with_capacity(buffer_capacity),
+            buffer_size: buffer_size,
+            seq_buffer: Vec::with_capacity(buffer_size),
             name_buffer: if with_metadata { Some(Vec::new()) } else { None },
             construction_thread,
             to_construction,
@@ -129,10 +128,9 @@ impl GBWTBuilder {
         if self.seq_buffer.is_empty() {
             return;
         }
-        let with_metadata = self.name_buffer.is_some();
-        let seq_buffer = std::mem::replace(&mut self.seq_buffer, Vec::with_capacity(self.buffer_capacity));
-        let name_buffer = if with_metadata {
-            Some(std::mem::replace(self.name_buffer.as_mut().unwrap(), Vec::new()))
+        let seq_buffer = std::mem::replace(&mut self.seq_buffer, Vec::with_capacity(self.buffer_size));
+        let name_buffer = if let Some(name_buffer) = self.name_buffer.as_mut() {
+            Some(std::mem::replace(name_buffer, Vec::new()))
         } else {
             None
         };
@@ -145,8 +143,8 @@ impl GBWTBuilder {
     ///
     /// Returns an error if the path contains an endmarker value ([`ENDMARKER`]).
     /// Returns an error if no path name was provided to a builder with metadata, or if a path name was provided to a builder without metadata.
-    pub fn insert(&mut self, path: &[u32], name: Option<FullPathName>) -> Result<(), String> {
-        if path.iter().any(|&node| node == ENDMARKER as u32) {
+    pub fn insert(&mut self, path: &[usize], name: Option<FullPathName>) -> Result<(), String> {
+        if path.iter().any(|&node| node == ENDMARKER) {
             return Err(String::from("GBWTBuilder: Path contains endmarker"));
         }
         if name.is_some() != self.name_buffer.is_some() {
@@ -158,10 +156,10 @@ impl GBWTBuilder {
         if self.bidirectional {
             space_needed *= 2;
         }
-        if self.seq_buffer.len() + space_needed > self.buffer_capacity {
-            if space_needed > self.buffer_capacity {
+        if self.seq_buffer.len() + space_needed > self.buffer_size {
+            if space_needed > self.buffer_size {
                 // Grow the buffer to fit the path.
-                self.buffer_capacity = space_needed;
+                self.buffer_size = space_needed;
             }
             self.flush_buffers();
         }
@@ -170,11 +168,14 @@ impl GBWTBuilder {
         // full, the next `insert` or `build` call will flush them. We do not
         // flush them here to avoid blocking the main thread if the construction
         // thread is busy.
-        self.seq_buffer.extend_from_slice(path);
+        self.seq_buffer.extend(path.iter().map(|&node| node as u32));
         self.seq_buffer.push(ENDMARKER as u32);
         if self.bidirectional {
             support::reverse_path_into(path, &mut self.seq_buffer);
             self.seq_buffer.push(ENDMARKER as u32);
+        }
+        if let Some(name_buffer) = self.name_buffer.as_mut() {
+            name_buffer.push(name.unwrap());
         }
 
         Ok(())
@@ -1158,28 +1159,6 @@ mod tests {
         assert!(metadata_match, "GBWT metadata should match ({})", test_case);
     }
 
-    #[test]
-    fn mutable_gbwt_empty() {
-        for (bidirectional, with_metadata) in [(false, false), (false, true), (true, false), (true, true)] {
-            let test_case = format!(
-                "bidirectional={}, with_metadata={}",
-                bidirectional, with_metadata
-            );
-            let builder = MutableGBWT::new(bidirectional, with_metadata);
-
-            // Check that flags and tags get initialized correctly.
-            assert_eq!(builder.is_bidirectional(), bidirectional, "MutableGBWT should have correct bidirectional flag ({})", test_case);
-            assert_eq!(builder.has_metadata(), with_metadata, "MutableGBWT should have correct metadata flag ({})", test_case);
-            assert_eq!(builder.tags().len(), 1, "MutableGBWT should start with one tag ({})", test_case);
-            let expected_value = String::from(SOURCE_VALUE);
-            assert_eq!(builder.tags().get(SOURCE_KEY), Some(&expected_value), "MutableGBWT should have the correct source tag ({})", test_case);
-
-            check_mutable_gbwt(&builder, &[], &[], &test_case);
-            let index = GBWT::from(builder);
-            check_built_gbwt(&index, &[], &[], bidirectional, with_metadata, &test_case);
-        }
-    }
-
     fn extract_test_case(gbwt_name: &'static str) -> (GBWT, Vec<Vec<usize>>, Vec<FullPathName>) {
         let filename = support::get_test_data(gbwt_name);
         let index: GBWT = serialize::load_from(&filename).unwrap();
@@ -1235,6 +1214,30 @@ mod tests {
         result
     }
 
+//-----------------------------------------------------------------------------
+
+    #[test]
+    fn mutable_gbwt_empty() {
+        for (bidirectional, with_metadata) in [(false, false), (false, true), (true, false), (true, true)] {
+            let test_case = format!(
+                "bidirectional={}, with_metadata={}",
+                bidirectional, with_metadata
+            );
+            let builder = MutableGBWT::new(bidirectional, with_metadata);
+
+            // Check that flags and tags get initialized correctly.
+            assert_eq!(builder.is_bidirectional(), bidirectional, "MutableGBWT should have correct bidirectional flag ({})", test_case);
+            assert_eq!(builder.has_metadata(), with_metadata, "MutableGBWT should have correct metadata flag ({})", test_case);
+            assert_eq!(builder.tags().len(), 1, "MutableGBWT should start with one tag ({})", test_case);
+            let expected_value = String::from(SOURCE_VALUE);
+            assert_eq!(builder.tags().get(SOURCE_KEY), Some(&expected_value), "MutableGBWT should have the correct source tag ({})", test_case);
+
+            check_mutable_gbwt(&builder, &[], &[], &test_case);
+            let index = GBWT::from(builder);
+            check_built_gbwt(&index, &[], &[], bidirectional, with_metadata, &test_case);
+        }
+    }
+
     #[test]
     fn mutable_gbwt_insert() {
         let (original, paths, names) = extract_test_case("example.gbwt");
@@ -1266,6 +1269,64 @@ mod tests {
             check_built_gbwt(&index, &paths, &names, bidirectional, with_metadata, &test_case);
             compare_gbwts(&index, &original, &test_case);
         }
+    }
+
+//-----------------------------------------------------------------------------
+
+    #[test]
+    fn gbwt_builder_empty() {
+        for (bidirectional, with_metadata) in [(false, false), (false, true), (true, false), (true, true)] {
+            let test_case = format!(
+                "bidirectional={}, with_metadata={}",
+                bidirectional, with_metadata
+            );
+            let builder = GBWTBuilder::new(bidirectional, with_metadata, 1000);
+            let result = builder.build();
+            assert!(result.is_ok(), "Empty builder failed ({}): {}", test_case, result.unwrap_err());
+            let index = result.unwrap();
+            check_built_gbwt(&index, &[], &[], bidirectional, with_metadata, &test_case);
+        }
+    }
+
+    #[test]
+    fn gbwt_builder_insert() {
+        let (original, paths, names) = extract_test_case("example.gbwt");
+
+        // Three buffer sizes: 0 (automatic rezize), 24 (multiple batches), 1000 (single batch).
+        for (bidirectional, with_metadata, buffer_size) in [
+            (false, false, 0), (false, false, 24), (false, false, 1000),
+            (false, true, 0), (false, true, 24), (false, true, 1000),
+            (true, false, 0), (true, false, 24), (true, false, 1000),
+            (true, true, 0), (true, true, 24), (true, true, 1000),
+        ] {
+            let test_case = format!(
+                "bidirectional={}, with_metadata={}, buffer_size={}",
+                bidirectional, with_metadata, buffer_size
+            );
+            let mut builder = GBWTBuilder::new(bidirectional, with_metadata, buffer_size);
+            for (i, (path, name)) in paths.iter().zip(names.iter()).enumerate() {
+                let name = if with_metadata { Some(name.clone()) } else { None };
+                let result = builder.insert(path, name);
+                assert!(result.is_ok(), "Builder failed with path {} ({}): {}", i, test_case, result.unwrap_err());
+            }
+
+            let result = builder.build();
+            assert!(result.is_ok(), "Build failed ({}): {}", test_case, result.unwrap_err());
+            let index = result.unwrap();
+            check_built_gbwt(&index, &paths, &names, bidirectional, with_metadata, &test_case);
+            compare_gbwts(&index, &original, &test_case);
+        }
+    }
+
+    #[test]
+    fn gbwt_builder_insert_empty() {
+        let mut builder = GBWTBuilder::new(false, false, 1000);
+        let result = builder.insert(&[], None);
+        assert!(result.is_ok(), "Builder failed with empty path: {}", result.unwrap_err());
+        let result = builder.build();
+        assert!(result.is_ok(), "Build failed with empty path: {}", result.unwrap_err());
+        let index = result.unwrap();
+        check_built_gbwt(&index, &[Vec::new()], &[], false, false, "empty path");
     }
 }
 

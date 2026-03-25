@@ -49,6 +49,11 @@ fn reverse_paths() {
 
     reverse_path_in_place(&mut original);
     assert_eq!(original, reversed, "Failed to reverse the path in place correctly");
+
+    let mut buffer = Vec::new();
+    reverse_path_into(&original, &mut buffer);
+    reverse_path_into(&original, &mut buffer);
+    assert_eq!(buffer, vec![1, 2, 4, 6, 1, 2, 4, 6], "Failed to reverse the path into a buffer correctly");
 }
 
 #[test]

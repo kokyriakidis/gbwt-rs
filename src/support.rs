@@ -371,16 +371,15 @@ pub fn reverse_path_in_place(path: &mut [usize]) {
     }
 }
 
-// FIXME: test
 /// Inserts the reversed path into the given buffer.
 ///
-/// This version uses 32-bit node identifiers to save space during GBWT construction.
+/// The buffer uses 32-bit node identifiers to save space during GBWT construction.
 /// The path is assumed to be a sequence of GBWT node identifiers.
 /// A reverse path visits the other orientation of each node in reverse order.
 /// See also [`reverse_path`] and [`reverse_path_in_place`].
-pub fn reverse_path_into(path: &[u32], buffer: &mut Vec<u32>) {
+pub fn reverse_path_into(path: &[usize], buffer: &mut Vec<u32>) {
     for node in path.iter().rev() {
-        buffer.push(flip_node(*node as usize) as u32);
+        buffer.push(flip_node(*node) as u32);
     }
 }
 
