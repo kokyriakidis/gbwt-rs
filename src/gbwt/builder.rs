@@ -481,7 +481,7 @@ impl MutableGBWT {
         // Ensure that the outgoing edges exist.
         node_pairs.sort_unstable();
         for (i, &(from, to)) in node_pairs.iter().enumerate() {
-            if i > 0 && node_pairs[i - 1].0 == from {
+            if i > 0 && node_pairs[i - 1] == (from, to) {
                 continue;
             }
             let predecessor = self.records.get_mut(&(from as usize)).unwrap();
@@ -492,7 +492,7 @@ impl MutableGBWT {
         node_pairs.sort_unstable_by_key(|&(_, to)| to);
         let mut start = 0;
         for (i, &(from, to)) in node_pairs.iter().enumerate() {
-            if i + 1 >= node_pairs.len() || node_pairs[i + 1].1 != to {
+            if i + 1 >= node_pairs.len() || node_pairs[i + 1] != (from, to) {
                 if to != ENDMARKER as u32 {
                     let successor = self.records.entry(to as usize).or_default();
                     successor.add_visits(from as usize, i - start + 1);
@@ -973,6 +973,25 @@ mod tests {
         }
     }
 
+    fn compare_gbwts(index: &GBWT, truth: &GBWT, test_case: &str) {
+        if index.is_bidirectional() != truth.is_bidirectional() || index.has_metadata() != truth.has_metadata() {
+            // The index was built with different options.
+            return;
+        }
+            let headers_match = index.header == truth.header;
+            assert!(headers_match, "GBWT headers should match ({})", test_case);
+            let tags_match = index.tags == truth.tags;
+            assert!(tags_match, "GBWT tags should match ({})", test_case);
+            let bwts_match = index.bwt == truth.bwt;
+            assert!(bwts_match, "GBWT BWTs should match ({})", test_case);
+            let endmarkers_match = index.endmarker == truth.endmarker;
+            // The endmarker in the built GBWT was built independently, while the one in the original was derived from BWT.
+            assert!(endmarkers_match, "GBWT endmarker records should match ({})", test_case);
+            // The original contains opaque DA samples data built with the C++ implementation.
+            let metadata_match = index.metadata == truth.metadata;
+            assert!(metadata_match, "GBWT metadata should match ({})", test_case);
+    }
+
     #[test]
     fn mutable_gbwt_empty() {
         for (bidirectional, with_metadata) in [(false, false), (false, true), (true, false), (true, true)] {
@@ -995,7 +1014,7 @@ mod tests {
         }
     }
 
-    fn extract_test_case(gbwt_name: &'static str) -> (Vec<Vec<usize>>, Vec<FullPathName>) {
+    fn extract_test_case(gbwt_name: &'static str) -> (GBWT, Vec<Vec<usize>>, Vec<FullPathName>) {
         let filename = support::get_test_data(gbwt_name);
         let index: GBWT = serialize::load_from(&filename).unwrap();
 
@@ -1003,12 +1022,12 @@ mod tests {
         let mut names = Vec::new();
         let metadata = index.metadata().unwrap();
         for path_id in 0..metadata.paths() {
-            let path: Vec<usize> = index.sequence(path_id).unwrap().collect();
+            let path: Vec<usize> = index.sequence(support::encode_path(path_id, Orientation::Forward)).unwrap().collect();
             paths.push(path);
             names.push(FullPathName::from_metadata(metadata, path_id).unwrap());
         }
 
-        (paths, names)
+        (index, paths, names)
     }
 
     fn generate_batches<'a>(
@@ -1052,7 +1071,7 @@ mod tests {
 
     #[test]
     fn mutable_gbwt_insert() {
-        let (paths, names) = extract_test_case("example.gbwt");
+        let (original, paths, names) = extract_test_case("example.gbwt");
 
         for (two_batches, bidirectional, with_metadata) in [
             (false, false, false),
@@ -1079,6 +1098,7 @@ mod tests {
             check_mutable_gbwt(&builder, &paths, &names, &test_case);
             let index = GBWT::from(builder);
             check_built_gbwt(&index, &paths, &names, bidirectional, with_metadata, &test_case);
+            compare_gbwts(&index, &original, &test_case);
         }
     }
 }

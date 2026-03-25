@@ -1750,6 +1750,22 @@ impl EdgeList {
         }
     }
 
+    /// Sets the offset in each edge to `0`.
+    pub fn clear_offsets(&mut self) {
+        match self {
+            EdgeList::Small(len, edges) => {
+                for edge in edges.iter_mut().take(*len as usize) {
+                    edge.offset = 0;
+                }
+            }
+            EdgeList::Large(map) => {
+                for offset in map.values_mut() {
+                    *offset = 0;
+                }
+            }
+        }
+    }
+
     /// Returns the offset in the given edge, or [`None`] if it does not exist.
     pub fn get(&self, node: usize) -> Option<u32> {
         match self {

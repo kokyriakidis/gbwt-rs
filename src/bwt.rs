@@ -304,8 +304,13 @@ impl BWTBuilder {
             return builder;
         }
 
+        // Endmarker edges from `MutableGBWT` use the offset field for counts.
+        let mut endmarker_edges = endmarker_edges.clone();
+        endmarker_edges.clear_offsets();
+
         // Determine the runs as (node, length).
         let runs = Self::get_runs(endmarker);
+
         builder.append(&endmarker_edges, runs.into_iter());
         builder
     }
@@ -440,7 +445,7 @@ impl<'a> FusedIterator for IdIter<'a> {}
 /// A partially decompressed node record.
 ///
 /// See module-level documentation for an example.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record<'a> {
     id: usize,
     edges: Vec<Pos>,
