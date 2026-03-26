@@ -41,3 +41,10 @@ required-features = ["binaries"]
 test = false
 bench = false
 doc = false
+
+[[bin]]
+name = "rebuild-gbwt"
+required-features = ["binaries"]
+test = false
+bench = false
+doc = false

@@ -15,7 +15,7 @@ It is based on the [Simple-SDS](https://github.com/jltsiren/simple-sds) library.
 - [x] Construction
 - [ ] Locate queries
 
-### GBWTGraph / GBZ
+### GBZ
 
 - [x] Simple-SDS [file format](https://github.com/jltsiren/gbwtgraph/blob/master/SERIALIZATION.md)
 - [x] Iteration over nodes and edges

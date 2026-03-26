@@ -23,7 +23,7 @@ use crate::headers::{Header, GBWTPayload};
 use crate::support::{self, Run, SmallRun, Tags, EdgeList};
 
 use std::collections::BTreeMap;
-use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc::{SyncSender, Receiver};
 use std::thread::JoinHandle;
 
 //-----------------------------------------------------------------------------
@@ -75,7 +75,7 @@ pub struct GBWTBuilder {
     // Construction thread that runs in the background.
     construction_thread: JoinHandle<Result<GBWT, String>>,
     // Channel for sending buffers to the construction thread.
-    to_construction: Sender<(Vec<u32>, Option<Vec<FullPathName>>)>,
+    to_construction: SyncSender<(Vec<u32>, Option<Vec<FullPathName>>)>,
 }
 
 fn build_gbwt(bidirectional: bool, with_metadata: bool, receiver: Receiver<(Vec<u32>, Option<Vec<FullPathName>>)>)
@@ -112,7 +112,8 @@ impl GBWTBuilder {
     /// * `buffer_size`: Total length of a batch of sequences, including endmarkers, in nodes.
     ///   This will increase automatically if a single path exceeds the capacity.
     pub fn new(bidirectional: bool, with_metadata: bool, buffer_size: usize) -> Self {
-        let (to_construction, receiver) = std::sync::mpsc::channel();
+        // We use up to three buffers: one in the main thread, one in the channel, and one in the construction thread.
+        let (to_construction, receiver) = std::sync::mpsc::sync_channel(1);
         let construction_thread = std::thread::spawn(move || build_gbwt(bidirectional, with_metadata, receiver));
         Self {
             bidirectional,
@@ -616,8 +617,11 @@ impl MutableGBWT {
                 while new_bwt.target_len < seq.curr.offset as usize {
                     if remaining.len == 0 {
                         // This can only fail if MutableGBWT is in an inconsistent state.
-                        remaining = run_iter.next()
-                            .expect("MutableGBWT: Existing runs did not reach the inserted position");
+                        let result = run_iter.next();
+                        if result.is_none() {
+                            panic!("MutableGBWT: Existing runs did not reach the inserted position {} in node {}", seq.curr.offset, curr);
+                        }
+                        remaining = result.unwrap();
                     }
                     remaining = new_bwt.insert_source_run(remaining, seq.curr.offset as usize);
                 }
@@ -812,6 +816,46 @@ impl From<MutableGBWT> for GBWT {
             metadata: builder.metadata.map(Metadata::from),
         }
     }
+}
+
+//-----------------------------------------------------------------------------
+
+/// Compares two GBWT indexes to ensure that they are bitwise identical.
+///
+/// The first index is assumed to be one built using this implementation.
+/// The second is assumed to be a known correct index.
+/// This does not compare document array samples, as only the C++ implementation currently builds them.
+/// Does nothing if the indexes were built with different options (bidirectional or with metadata).
+///
+/// # Errors
+///
+/// Returns an error message if the indexes differ in any of the compared components.
+pub fn compare_gbwts(index: &GBWT, truth: &GBWT, test_case: &str) -> Result<(), String> {
+    if index.is_bidirectional() != truth.is_bidirectional() || index.has_metadata() != truth.has_metadata() {
+        // The index was built with different options.
+        return Ok(());
+    }
+
+    if index.header != truth.header {
+        return Err(format!("GBWT headers do not match ({})", test_case));
+    }
+    if index.tags != truth.tags {
+        return Err(format!("GBWT tags do not match ({})", test_case));
+    }
+    if index.bwt != truth.bwt {
+        return Err(format!("GBWT BWTs do not match ({})", test_case));
+    }
+    // While the truth is derived from the BWT, the endmarker in a built index
+    // was created independently.
+    if index.endmarker != truth.endmarker {
+        return Err(format!("GBWT endmarker records do not match ({})", test_case));
+    }
+    // We do not compara DA samples, as only the C++ implementation currently builds them.
+    if index.metadata != truth.metadata {
+        return Err(format!("GBWT metadata do not match ({})", test_case));
+    }
+
+    Ok(())
 }
 
 //-----------------------------------------------------------------------------
@@ -1140,25 +1184,6 @@ mod tests {
         }
     }
 
-    fn compare_gbwts(index: &GBWT, truth: &GBWT, test_case: &str) {
-        if index.is_bidirectional() != truth.is_bidirectional() || index.has_metadata() != truth.has_metadata() {
-            // The index was built with different options.
-            return;
-        }
-        let headers_match = index.header == truth.header;
-        assert!(headers_match, "GBWT headers should match ({})", test_case);
-        let tags_match = index.tags == truth.tags;
-        assert!(tags_match, "GBWT tags should match ({})", test_case);
-        let bwts_match = index.bwt == truth.bwt;
-        assert!(bwts_match, "GBWT BWTs should match ({})", test_case);
-        let endmarkers_match = index.endmarker == truth.endmarker;
-        // The endmarker in the built GBWT was built independently, while the one in the original was derived from BWT.
-        assert!(endmarkers_match, "GBWT endmarker records should match ({})", test_case);
-        // The original contains opaque DA samples data built with the C++ implementation.
-        let metadata_match = index.metadata == truth.metadata;
-        assert!(metadata_match, "GBWT metadata should match ({})", test_case);
-    }
-
     fn extract_test_case(gbwt_name: &'static str) -> (GBWT, Vec<Vec<usize>>, Vec<FullPathName>) {
         let filename = support::get_test_data(gbwt_name);
         let index: GBWT = serialize::load_from(&filename).unwrap();
@@ -1267,7 +1292,8 @@ mod tests {
             check_mutable_gbwt(&builder, &paths, &names, &test_case);
             let index = GBWT::from(builder);
             check_built_gbwt(&index, &paths, &names, bidirectional, with_metadata, &test_case);
-            compare_gbwts(&index, &original, &test_case);
+            let result = compare_gbwts(&index, &original, &test_case);
+            assert!(result.is_ok(), "{}", result.unwrap_err());
         }
     }
 
@@ -1314,7 +1340,8 @@ mod tests {
             assert!(result.is_ok(), "Build failed ({}): {}", test_case, result.unwrap_err());
             let index = result.unwrap();
             check_built_gbwt(&index, &paths, &names, bidirectional, with_metadata, &test_case);
-            compare_gbwts(&index, &original, &test_case);
+            let result = compare_gbwts(&index, &original, &test_case);
+            assert!(result.is_ok(), "{}", result.unwrap_err());
         }
     }
 
