@@ -911,6 +911,7 @@ mod tests {
     use crate::support;
     use simple_sds::serialize;
     use std::collections::HashSet;
+    use rand::seq::SliceRandom;
 
     #[test]
     #[ignore]
@@ -1243,6 +1244,19 @@ mod tests {
         (index, paths, names)
     }
 
+    // Generates all subpaths of the given path, in random order.
+    fn subpath_test_case(path: &[usize]) -> Vec<Vec<usize>> {
+        let mut result = Vec::new();
+        for start in 0..path.len() {
+            for end in start..=path.len() {
+                result.push(path[start..end].to_vec());
+            }
+        }
+        let mut rng = rand::rng();
+        result.shuffle(&mut rng);
+        result
+    }
+
     fn generate_batches<'a>(
         paths: &[Vec<usize>], path_names: &'a [FullPathName],
         two_batches: bool, bidirectional: bool, with_metadata: bool
@@ -1309,7 +1323,6 @@ mod tests {
     #[test]
     fn mutable_gbwt_insert() {
         let (original, paths, names) = extract_test_case("example.gbwt");
-
         for (two_batches, bidirectional, with_metadata) in [
             (false, false, false),
             (false, false, true),
@@ -1337,6 +1350,28 @@ mod tests {
             check_built_gbwt(&index, &paths, &names, bidirectional, with_metadata, &test_case);
             let result = compare_gbwts(&index, &original, &test_case);
             assert!(result.is_ok(), "{}", result.unwrap_err());
+        }
+    }
+
+    #[test]
+    fn mutable_gbwt_subpaths() {
+        let paths = subpath_test_case(&[2, 4, 6, 8, 10]);
+        for (two_batches, bidirectional) in [(false, false), (false, true), (true, false), (true, true)] {
+            let test_case = format!(
+                "two_batches={}, bidirectional={}",
+                two_batches, bidirectional
+            );
+
+            // Build the GBWT and validate it.
+            let batches = generate_batches(&paths, &[], two_batches, bidirectional, false);
+            let mut builder = MutableGBWT::new(bidirectional, false);
+            for (i, (buffer, _)) in batches.iter().enumerate() {
+                let result = builder.insert(buffer, None);
+                assert!(result.is_ok(), "Builder failed with batch {} ({})", i, test_case);
+            }
+            check_mutable_gbwt(&builder, &paths, &[], &test_case);
+            let index = GBWT::from(builder);
+            check_built_gbwt(&index, &paths, &[], bidirectional, false, &test_case);
         }
     }
 
@@ -1388,10 +1423,6 @@ mod tests {
         }
     }
 
-    // FIXME: test case with partially overlapping paths in an arbitrary order
-    // take a path 2, 4, 6, 8..., take all subpaths, and shuffle
-    // FIXME: also for MutableGBWT
-
     #[test]
     fn gbwt_builder_insert_empty() {
         let mut builder = GBWTBuilder::new(false, false, 1000);
@@ -1401,6 +1432,27 @@ mod tests {
         assert!(result.is_ok(), "Build failed with empty path: {}", result.unwrap_err());
         let index = result.unwrap();
         check_built_gbwt(&index, &[Vec::new()], &[], false, false, "empty path");
+    }
+
+    #[test]
+    fn gbwt_builder_subpaths() {
+        let paths = subpath_test_case(&[2, 4, 6, 8, 10]);
+        for (bidirectional, buffer_size) in [(false, 0), (false, 24), (false, 1000), (true, 0), (true, 24), (true, 1000)] {
+            let test_case = format!(
+                "bidirectional={}, buffer_size={}",
+                bidirectional, buffer_size
+            );
+            let mut builder = GBWTBuilder::new(bidirectional, false, buffer_size);
+            for (i, path) in paths.iter().enumerate() {
+                let result = builder.insert(path, None);
+                assert!(result.is_ok(), "Builder failed with path {} ({}): {}", i, test_case, result.unwrap_err());
+            }
+
+            let result = builder.build();
+            assert!(result.is_ok(), "Build failed ({}): {}", test_case, result.unwrap_err());
+            let index = result.unwrap();
+            check_built_gbwt(&index, &paths, &[], bidirectional, false, &test_case);
+        }
     }
 }
 
