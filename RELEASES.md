@@ -5,6 +5,7 @@
 * GBWT construction:
   * Insert batches of sequences into `MutableGBWT` and convert it to `GBWT`.
   * Insert paths one by one into `GBWTBuilder` to build the `GBWT` in a background thread.
+* `Graph` has been renamed to `Sequences` to better reflect the purpose of the structure.
 
 ## GBZ 0.5.1 (2026-02-13)
 
