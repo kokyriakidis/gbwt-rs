@@ -425,9 +425,12 @@ pub struct MutableGBWT {
     endmarker: Vec<Pos>,
     // Outgoing edges from the endmarker as (node id, number of sequences starting with that node).
     endmarker_edges: EdgeList,
-    // FIXME: Would Box<MutableRecord> be more efficient here?
+    // FIXME: Array of Option<Box<MutableRecord>> would be faster
     // Other records as a map from node id to mutable record.
-    records: BTreeMap<usize, MutableRecord>,
+    // We use `Box` to make the construction faster and more space-efficient.
+    // Each `MutableRecord` is 96 bytes + possible heap allocations.
+    // B-tree nodes have space for 11 entries, out of which 3 are empty on the average.
+    records: BTreeMap<usize, Box<MutableRecord>>,
     // Optional metadata.
     metadata: Option<MetadataBuilder>,
 }
@@ -591,7 +594,7 @@ impl MutableGBWT {
 
     // Recomputes the offsets in the outgoing edges from predecessors to the given node.
     fn recompute_outgoing_edges(
-        records: &mut BTreeMap<usize, MutableRecord>,
+        records: &mut BTreeMap<usize, Box<MutableRecord>>,
         endmarker_edges: &EdgeList,
         to: usize
     ) {
