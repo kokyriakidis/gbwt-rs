@@ -113,14 +113,13 @@ impl Config {
     fn parse_buffer_size(arg: &str) -> Result<usize, String> {
         // The argument should be a number followed by an optional suffix
         // (K, M, G in either case).
-        let mut chars = arg.chars();
         let mut number_str = String::new();
         let mut suffix: Option<char> = None;
-        while let Some(c) = chars.next() {
-            if c.is_digit(10) {
+        for c in arg.chars() {
+            if c.is_ascii_digit() {
                 number_str.push(c);
             } else {
-                if let Some(_) = suffix {
+                if suffix.is_some() {
                     return Err(format!("Invalid buffer size: {}", arg));
                 }
                 suffix = Some(c);
@@ -128,17 +127,14 @@ impl Config {
         }
 
         let mut number: usize = number_str.parse().map_err(|_| format!("Invalid buffer size: {}", arg))?;
-        match suffix {
-            Some(c) => {
-                let multiplier = match c.to_ascii_uppercase() {
-                    'K' => 1000,
-                    'M' => 1000_000,
-                    'G' => 1000_000_000,
-                    _ => return Err(format!("Invalid buffer size: {}", arg)),
-                };
-                number *= multiplier;
-            }
-            None => {}
+        if let Some(c) = suffix {
+            let multiplier = match c.to_ascii_uppercase() {
+                'K' => 1000,
+                'M' => 1_000_000,
+                'G' => 1_000_000_000,
+                _ => return Err(format!("Invalid buffer size: {}", arg)),
+            };
+            number *= multiplier;
         }
 
         Ok(number)

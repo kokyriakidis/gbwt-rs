@@ -1748,15 +1748,13 @@ impl EdgeList {
     pub fn set_ranks(&mut self) {
         match self {
             EdgeList::Small(len, edges) => {
-                for i in 0..*len as usize {
-                    edges[i].offset = i as u32;
+                for (i, edge) in edges.iter_mut().take(*len as usize).enumerate() {
+                    edge.offset = i as u32;
                 }
             }
             EdgeList::Large(map) => {
-                let mut rank = 0;
-                for offset in map.values_mut() {
-                    *offset = rank;
-                    rank += 1;
+                for (i, offset) in map.values_mut().enumerate() {
+                    *offset = i as u32;
                 }
             }
         }

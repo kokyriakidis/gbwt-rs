@@ -120,7 +120,7 @@ impl GBWTBuilder {
         let construction_thread = std::thread::spawn(move || build_gbwt(bidirectional, with_metadata, receiver));
         Self {
             bidirectional,
-            buffer_size: buffer_size,
+            buffer_size,
             seq_buffer: Vec::with_capacity(buffer_size),
             name_buffer: if with_metadata { Some(Vec::new()) } else { None },
             construction_thread,
@@ -134,7 +134,7 @@ impl GBWTBuilder {
         }
         let seq_buffer = std::mem::replace(&mut self.seq_buffer, Vec::with_capacity(self.buffer_size));
         let name_buffer = if let Some(name_buffer) = self.name_buffer.as_mut() {
-            Some(std::mem::replace(name_buffer, Vec::new()))
+            Some(std::mem::take(name_buffer))
         } else {
             None
         };
@@ -148,7 +148,7 @@ impl GBWTBuilder {
     /// Returns an error if the path contains an endmarker value ([`ENDMARKER`]).
     /// Returns an error if no path name was provided to a builder with metadata, or if a path name was provided to a builder without metadata.
     pub fn insert(&mut self, path: &[usize], name: Option<FullPathName>) -> Result<(), String> {
-        if path.iter().any(|&node| node == ENDMARKER) {
+        if path.contains(&ENDMARKER) {
             return Err(String::from("GBWTBuilder: Path contains endmarker"));
         }
         if name.is_some() != self.name_buffer.is_some() {
@@ -509,7 +509,7 @@ impl MutableGBWT {
         let mut pos = self.endmarker[sequence_id];
         while pos.node != ENDMARKER {
             result.push(pos.node as u32);
-            let record = self.records.get(pos.node as usize - self.first_node)?.as_ref()?;
+            let record = self.records.get(pos.node - self.first_node)?.as_ref()?;
             pos = record.follow_path(pos.offset)?;
         }
 
@@ -646,7 +646,7 @@ impl MutableGBWT {
                 // The offset is always 0 in an outgoing edge from the endmarker.
                 offset += endmarker_edges.get(to).unwrap_or(0) as usize;
             } else {
-                let predecessor = records[edge.node as usize - first_node].as_mut().unwrap();
+                let predecessor = records[edge.node - first_node].as_mut().unwrap();
                 predecessor.set_edge_offset(to, offset);
                 offset += edge.offset;
             }
