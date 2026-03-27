@@ -283,12 +283,12 @@ impl Payload for MetadataPayload {
 /// Payload for the GBWTGraph header.
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq)]
-pub struct GraphPayload {
+pub struct SequencesPayload {
     /// Number of nodes in the original graph.
     pub nodes: usize,
 }
 
-impl GraphPayload {
+impl SequencesPayload {
     /// The graph contains a node-to-segment translation.
     pub const FLAG_TRANSLATION: u64 = 0x0001;
 
@@ -299,8 +299,8 @@ impl GraphPayload {
     pub const ZSTD_VERSION: u32 = 4;
 }
 
-impl Payload for GraphPayload {
-    const NAME: &'static str = "GraphHeader";
+impl Payload for SequencesPayload {
+    const NAME: &'static str = "SequencesHeader";
     const TAG: u32 = 0x6B3764AF;
     const VERSION: u32 = 4;
     const MIN_VERSION: u32 = 3;
@@ -396,14 +396,14 @@ mod tests {
     }
 
     #[test]
-    fn graph_header() {
-        let header = Header::<GraphPayload>::new();
+    fn sequences_header() {
+        let header = Header::<SequencesPayload>::new();
         if let Err(msg) = header.validate() {
             panic!("{}", msg);
         }
-        assert!(!header.is_set(GraphPayload::FLAG_TRANSLATION), "Default: Translation flag is set");
-        assert!(header.is_set(GraphPayload::FLAG_SIMPLE_SDS), "Default: Simple-SDS flag is not set");
-        serialize::test(&header, "graph-header", Some(3), true);
+        assert!(!header.is_set(SequencesPayload::FLAG_TRANSLATION), "Default: Translation flag is set");
+        assert!(header.is_set(SequencesPayload::FLAG_SIMPLE_SDS), "Default: Simple-SDS flag is not set");
+        serialize::test(&header, "sequences-header", Some(3), true);
     }
 
     #[test]

@@ -5,18 +5,29 @@
 //! ```
 //! use gbz::Pos;
 //! use gbz::bwt::{BWT, BWTBuilder};
-//! use gbz::support::Run;
+//! use gbz::support::{Run, EdgeList};
 //!
 //! // Encode the GBWT example from the paper.
-//! let mut builder = BWTBuilder::new();
-//! builder.append(&[Pos::new(1, 0)], &[Run::new(0, 3)]);
-//! builder.append(&[Pos::new(2, 0), Pos::new(3, 0)], &[Run::new(0, 2), Run::new(1, 1)]);
-//! builder.append(&[Pos::new(4, 0), Pos::new(5, 0)], &[Run::new(0, 1), Run::new(1, 1)]);
-//! builder.append(&[Pos::new(4, 1)], &[Run::new(0, 1)]);
-//! builder.append(&[Pos::new(5, 1), Pos::new(6, 0)], &[Run::new(1, 1), Run::new(0, 1)]);
-//! builder.append(&[Pos::new(7, 0)], &[Run::new(0, 2)]);
-//! builder.append(&[Pos::new(7, 2)], &[Run::new(0, 1)]);
-//! builder.append(&[Pos::new(0, 0)], &[Run::new(0, 3)]);
+//! let mut endmarker_edges = EdgeList::new();
+//! endmarker_edges.increment(1, 0);
+//! let mut builder = BWTBuilder::new(
+//!     &endmarker_edges, &[Pos::new(1, 0), Pos::new(1, 1), Pos::new(1, 2)]
+//! );
+//!
+//! fn add_node(builder: &mut BWTBuilder, edges: &[Pos], runs: &[Run]) {
+//!     let mut edge_list = EdgeList::new();
+//!     for edge in edges.iter() {
+//!         edge_list.increment(edge.node, edge.offset);
+//!     }
+//!     builder.append(&edge_list, runs.iter().copied());
+//! }
+//! add_node(&mut builder, &[Pos::new(2, 0), Pos::new(3, 0)], &[Run::new(2, 2), Run::new(3, 1)]);
+//! add_node(&mut builder, &[Pos::new(4, 0), Pos::new(5, 0)], &[Run::new(4, 1), Run::new(5, 1)]);
+//! add_node(&mut builder, &[Pos::new(4, 1)], &[Run::new(4, 1)]);
+//! add_node(&mut builder, &[Pos::new(5, 1), Pos::new(6, 0)], &[Run::new(5, 1), Run::new(6, 1)]);
+//! add_node(&mut builder, &[Pos::new(7, 0)], &[Run::new(7, 2)]);
+//! add_node(&mut builder, &[Pos::new(7, 2)], &[Run::new(7, 1)]);
+//! add_node(&mut builder, &[Pos::new(0, 0)], &[Run::new(0, 3)]);
 //!
 //! let bwt = BWT::from(builder);
 //! assert_eq!(bwt.len(), 8);
@@ -39,7 +50,7 @@
 //! assert_eq!(ids, vec![0, 1, 2, 3, 4, 5, 6, 7]);
 //! ```
 
-use crate::support::{ByteCodeIter, Run, RLE, RLEIter};
+use crate::support::{ByteCodeIter, Run, RLE, RLEIter, EdgeList};
 use crate::ENDMARKER;
 use crate::support;
 
@@ -60,6 +71,13 @@ mod tests;
 //-----------------------------------------------------------------------------
 
 /// A GBWT position as a (node, offset) pair.
+///
+/// The offset is typically one of the following:
+///
+/// * The offset of the first sequence coming from the source node in the destination node.
+/// * The total number of times this edge is used by the sequences.
+///
+/// See [`SmallPos`] for a more compact version.
 #[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pos {
     /// GBWT node identifier.
@@ -82,6 +100,46 @@ impl From<(usize, usize)> for Pos {
     #[inline]
     fn from(pos: (usize, usize)) -> Self {
         Self::new(pos.0, pos.1)
+    }
+}
+
+/// A [`Pos`] encoded using 32-bit integers to save space.
+///
+/// This is intended for situations, where we store a large number of edges explicitly.
+/// The C++ implementation also uses 32-bit integers in similar situations.
+#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SmallPos {
+    /// GBWT node identifier.
+    pub node: u32,
+    /// BWT offset within the node.
+    pub offset: u32,
+}
+
+impl SmallPos {
+    /// Creates a new position.
+    pub fn new(node: usize, offset: usize) -> Self {
+        SmallPos {
+            node: node as u32,
+            offset: offset as u32,
+        }
+    }
+}
+
+impl From<(usize, usize)> for SmallPos {
+    fn from(pos: (usize, usize)) -> Self {
+        Self::new(pos.0, pos.1)
+    }
+}
+
+impl From<SmallPos> for Pos {
+    fn from(pos: SmallPos) -> Self {
+        Pos::new(pos.node as usize, pos.offset as usize)
+    }
+}
+
+impl From<Pos> for SmallPos {
+    fn from(pos: Pos) -> Self {
+        Self::new(pos.node, pos.offset)
     }
 }
 
@@ -206,18 +264,54 @@ impl From<BWTBuilder> for BWT {
 
 /// A structure for building the BWT by appending node records.
 ///
-/// This is mostly inteded for testing at the moment, as no BWT construction algorithms have been implemented.
+/// This is mostly intended to be used inside [`crate::gbwt::builder::MutableGBWT`].
 /// See module-level documentation for an example.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct BWTBuilder {
     offsets: Vec<usize>,
     encoder: RLE,
 }
 
 impl BWTBuilder {
-    /// Creates a new builder.
-    pub fn new() -> Self {
-        BWTBuilder::default()
+    fn get_runs(values: &[Pos]) -> Vec<Run> {
+        let mut runs = Vec::new();
+        let mut start = 0;
+        for i in 0..values.len() {
+            if i + 1 >= values.len() || values[i].node != values[i + 1].node {
+                runs.push(Run::new(values[i].node, i + 1 - start));
+                start = i + 1;
+            }
+        }
+        runs
+    }
+
+    /// Creates a new builder with the given endmarker record.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if exactly one of the arguments is empty.
+    /// Will panic if the endmarker contains a node not present in the edge list.
+    pub fn new(endmarker_edges: &EdgeList, endmarker: &[Pos]) -> Self {
+        if endmarker_edges.is_empty() && !endmarker.is_empty() {
+            panic!("BWTBuilder: Endmarker edges and positions must both be empty or both non-empty");
+        }
+        let mut builder = BWTBuilder {
+            offsets: Vec::new(),
+            encoder: RLE::new(),
+        };
+        if endmarker.is_empty() {
+            return builder;
+        }
+
+        // Endmarker edges from `MutableGBWT` use the offset field for counts.
+        let mut endmarker_edges = endmarker_edges.clone();
+        endmarker_edges.clear_offsets();
+
+        // Determine the runs as (node, length).
+        let runs = Self::get_runs(endmarker);
+
+        builder.append(&endmarker_edges, runs.into_iter());
+        builder
     }
 
     /// Returns the number of records.
@@ -237,19 +331,40 @@ impl BWTBuilder {
     /// The record consists of a list of edges and a list of runs.
     /// Each edge is a position in the successor node.
     /// Note that the successor node is given by its node id, which is not necessarily the same as its record id.
-    /// Each run must have `run.value < edges.len()` and `run.len > 0`.
-    pub fn append(&mut self, edges: &[Pos], runs: &[Run]) {
+    /// Each run must be of a node that is present in the edge list.
+    ///
+    /// # Arguments
+    ///
+    /// * `edges`: List of outgoing edges from the node and offsets in the destination node.
+    /// * `runs`: An iterator over the runs as (successor node id, run length) pairs.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if a run is of a node not present in the edge list.
+    pub fn append(&mut self, edges: &EdgeList, runs: impl Iterator<Item = Run>) {
         self.offsets.push(self.encoder.len());
         self.encoder.write_int(edges.len());
         let mut prev = 0;
-        for edge in edges {
+        for edge in edges.iter() {
             self.encoder.write_int(edge.node - prev); self.encoder.write_int(edge.offset);
             prev = edge.node;
         }
         self.encoder.set_sigma(edges.len());
+
+        // We need to convert the node ids in the runs to edge ranks.
+        let mut ranks = edges.clone();
+        ranks.set_ranks();
         for run in runs {
-            self.encoder.write(*run);
+            let mut run = run;
+            run.value = ranks.get(run.value).expect("BWTBuilder: Destination node not found in edge ranks") as usize;
+            self.encoder.write(run);
         }
+    }
+
+    /// Appends an empty record to the BWT.
+    pub fn append_empty(&mut self) {
+        self.offsets.push(self.encoder.len());
+        self.encoder.write_int(0);
     }
 }
 
@@ -329,7 +444,7 @@ impl<'a> FusedIterator for IdIter<'a> {}
 /// A partially decompressed node record.
 ///
 /// See module-level documentation for an example.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record<'a> {
     id: usize,
     edges: Vec<Pos>,

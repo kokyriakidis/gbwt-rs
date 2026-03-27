@@ -446,7 +446,7 @@ fn links() {
                 panic!("Could not get predecessors for segment {} {}", segment.id, orientation);
             }
             for (s, _) in gbz.segment_predecessors(&segment, orientation).unwrap() {
-                assert_eq!(s, gbz.graph.segment(s.id), "Invalid predecessor segment {} for segment {} ({})", s.id, segment.id, orientation);
+                assert_eq!(s, gbz.sequences.segment(s.id), "Invalid predecessor segment {} for segment {} ({})", s.id, segment.id, orientation);
             }
 
             let truth = successors.get(&(segment.id, orientation)).unwrap();
@@ -456,7 +456,7 @@ fn links() {
                 panic!("Could not get successors for segment {} {}", segment.id, orientation);
             }
             for (s, _) in gbz.segment_successors(&segment, orientation).unwrap() {
-                assert_eq!(s, gbz.graph.segment(s.id), "Invalid successor segment {} for segment {} ({})", s.id, segment.id, orientation);
+                assert_eq!(s, gbz.sequences.segment(s.id), "Invalid successor segment {} for segment {} ({})", s.id, segment.id, orientation);
             }
         }
     }
@@ -492,7 +492,7 @@ fn segment_paths() {
     for id in 0..gbz.paths() {
         for orientation in [Orientation::Forward, Orientation::Reverse] {
             for (s, _) in gbz.segment_path(id, orientation).unwrap() {
-                assert_eq!(s, gbz.graph.segment(s.id), "Invalid segment {} on path {} ({})", s.id, id, orientation);
+                assert_eq!(s, gbz.sequences.segment(s.id), "Invalid segment {} on path {} ({})", s.id, id, orientation);
             }
         }
     }

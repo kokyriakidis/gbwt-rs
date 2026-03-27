@@ -1,6 +1,6 @@
 //! GBZ: Space-efficient representation for a subset of GFA.
 //!
-//! The [`GBZ`] structure combines a [`GBWT`] index and the sequences in a [`Graph`] structure.
+//! The [`GBZ`] structure combines a [`GBWT`] index and the sequences in a [`Sequences`] structure.
 //! It is a space-efficient file format for storing a pangenome graph based on aligned haplotype sequences, with the haplotypes stored as paths.
 //! The format is compatible with a subset of [GFA1](https://github.com/GFA-spec/GFA-spec/blob/master/GFA1.md).
 //!
@@ -13,11 +13,11 @@
 //! See also the [C++ implementation](https://github.com/jltsiren/gbwtgraph) and the [file format specification](https://github.com/jltsiren/gbwtgraph/blob/master/SERIALIZATION.md).
 
 use crate::{ENDMARKER, SOURCE_KEY, SOURCE_VALUE, GENERIC_SAMPLE, REFERENCE_SAMPLES_KEY};
-use crate::{Segment, GBWT, BidirectionalState, Orientation, Pos};
+use crate::{Segment, GBWT, BidirectionalState, Orientation, Pos, Metadata};
 use crate::bwt::Record;
-use crate::gbwt::{SequenceIter, Metadata};
-use crate::graph::Graph;
-use crate::graph::SegmentIter as GraphSegmentIter;
+use crate::gbwt::SequenceIter;
+use crate::sequences::Sequences;
+use crate::sequences::SegmentIter as SequencesSegmentIter;
 use crate::headers::{Header, GBZPayload};
 use crate::support::{DisjointSets, Tags};
 use crate::support;
@@ -41,11 +41,11 @@ mod tests;
 
 /// GBZ file format for storing GFA graphs with many paths.
 ///
-/// A GBZ graph combines a [`GBWT`] index and a [`Graph`].
+/// A GBZ graph combines a [`GBWT`] index and a [`Sequences`] structure.
 /// It represents the subgraph of the original graph induced by the paths in the GBWT index.
 /// `GBZ` methods used node identifiers in the original graph.
 /// Functions [`support::encode_node`], [`support::node_id`], [`support::node_orientation`], [`support::decode_node`], and [`support::flip_node`] enable conversions between original and GBWT node ids.
-/// While the methods in [`Graph`] may panic or return unpredictable results when the corresponding object does not exist, `GBZ` methods return [`None`] in such cases.
+/// While the methods in [`Sequences`] may panic or return unpredictable results when the corresponding object does not exist, `GBZ` methods return [`None`] in such cases.
 ///
 /// In addition to representing a bidirected sequence graph with integer node ids, a `GBZ` also contains an optional node-to-segment translation.
 /// The translation enables representing a GFA graph, where each segment has a string name and corresponds to the concatenation of a range of nodes.
@@ -125,7 +125,7 @@ pub struct GBZ {
     header: Header<GBZPayload>,
     tags: Tags,
     index: GBWT,
-    graph: Graph,
+    sequences: Sequences,
     real_nodes: BitVector,
 }
 
@@ -266,7 +266,7 @@ impl GBZ {
     /// Returns the number of nodes in the graph.
     #[inline]
     pub fn nodes(&self) -> usize {
-        self.graph.nodes()
+        self.sequences.nodes()
     }
 
     /// Returns the smallest node identifier in the original graph.
@@ -294,7 +294,7 @@ impl GBZ {
             return None;
         }
         let sequence_id = self.graph_node_to_sequence(node_id);
-        Some(self.graph.sequence(sequence_id))
+        Some(self.sequences.sequence(sequence_id))
     }
 
     /// Returns the length of the sequence for the node in the original graph, or [`None`] if there is no such node.
@@ -303,7 +303,7 @@ impl GBZ {
             return None;
         }
         let sequence_id = self.graph_node_to_sequence(node_id);
-        Some(self.graph.sequence_len(sequence_id))
+        Some(self.sequences.sequence_len(sequence_id))
     }
 
     /// Returns an iterator over the node identifiers in the original graph.
@@ -360,7 +360,7 @@ impl GBZ {
     /// Returns `true` if the graph contains a node-to-segment translation.
     #[inline]
     pub fn has_translation(&self) -> bool {
-        self.graph.has_translation()
+        self.sequences.has_translation()
     }
 
     /// Returns the segment containing node `node_id` of the original graph.
@@ -369,7 +369,7 @@ impl GBZ {
     /// Note that random access to the translation is somewhat slow.
     pub fn node_to_segment(&'_ self, node_id: usize) -> Option<Segment<'_>> {
         if self.has_translation() && self.has_node(node_id) {
-            Some(self.graph.node_to_segment(node_id))
+            Some(self.sequences.node_to_segment(node_id))
         } else {
             None
         }
@@ -382,7 +382,7 @@ impl GBZ {
         if self.has_translation() {
             Some(SegmentIter {
                 parent: self,
-                iter: self.graph.segment_iter(),
+                iter: self.sequences.segment_iter(),
             })
         } else {
             None
@@ -667,7 +667,7 @@ impl Serialize for GBZ {
     fn serialize_body<T: io::Write>(&self, writer: &mut T) -> io::Result<()> {
         self.tags.serialize(writer)?;
         self.index.serialize(writer)?;
-        self.graph.serialize(writer)?;
+        self.sequences.serialize(writer)?;
         Ok(())
     }
 
@@ -686,9 +686,9 @@ impl Serialize for GBZ {
         }
         let potential_nodes = (index.alphabet_size() - index.first_node()) / 2;
 
-        let graph = Graph::load(reader)?;
-        if graph.sequences() != potential_nodes {
-            return Err(Error::new(ErrorKind::InvalidData, "GBZ: Mismatch between GBWT alphabet size and Graph sequence count"));
+        let sequences = Sequences::load(reader)?;
+        if sequences.sequences() != potential_nodes {
+            return Err(Error::new(ErrorKind::InvalidData, "GBZ: Mismatch between GBWT alphabet size and Sequences sequence count"));
         }
 
         // Cache real nodes.
@@ -711,13 +711,13 @@ impl Serialize for GBZ {
             header,
             tags,
             index,
-            graph,
+            sequences,
             real_nodes: BitVector::from(real_nodes),
         })
     }
 
     fn size_in_elements(&self) -> usize {
-        self.header.size_in_elements() + self.tags.size_in_elements() + self.index.size_in_elements() + self.graph.size_in_elements()
+        self.header.size_in_elements() + self.tags.size_in_elements() + self.index.size_in_elements() + self.sequences.size_in_elements()
     }
 }
 
@@ -729,9 +729,9 @@ impl AsRef<GBWT> for GBZ {
     }
 }
 
-impl AsRef<Graph> for GBZ {
-    fn as_ref(&self) -> &Graph {
-        &self.graph
+impl AsRef<Sequences> for GBZ {
+    fn as_ref(&self) -> &Sequences {
+        &self.sequences
     }
 }
 
@@ -896,7 +896,7 @@ impl<'a> FusedIterator for EdgeIter<'a> {}
 /// A read-only iterator over the segments in the GFA graph.
 ///
 /// The type of `Item` is [`Segment`].
-/// Unlike [`crate::graph::SegmentIter`], this iterator will skip segments corresponding to unused node ids.
+/// Unlike [`crate::sequences::SegmentIter`], this iterator will skip segments corresponding to unused node ids.
 ///
 /// # Examples
 ///
@@ -918,7 +918,7 @@ impl<'a> FusedIterator for EdgeIter<'a> {}
 #[derive(Clone, Debug)]
 pub struct SegmentIter<'a> {
     parent: &'a GBZ,
-    iter: GraphSegmentIter<'a>,
+    iter: SequencesSegmentIter<'a>,
 }
 
 impl<'a> Iterator for SegmentIter<'a> {

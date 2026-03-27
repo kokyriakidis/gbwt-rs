@@ -1,5 +1,12 @@
 # Releases
 
+## Current version
+
+* GBWT construction:
+  * Insert batches of sequences into `MutableGBWT` and convert it to `GBWT`.
+  * Insert paths one by one into `GBWTBuilder` to build the `GBWT` in a background thread.
+* `Graph` has been renamed to `Sequences` to better reflect the purpose of the structure.
+
 ## GBZ 0.5.1 (2026-02-13)
 
 * Convert between internal and vg conventions for generic path names when (de)serializing metadata.
@@ -71,7 +78,8 @@ The first pre-release includes supports the GBWT Simple-SDS file format as well 
 ## Release process
 
 * Run `cargo clippy --features=binaries`.
-* Run tests with `cargo test`.
+* Run tests with `cargo test` and `cargo test -- --ignored`.
+* Build documentation with `cargo doc`.
 * Update version in `Cargo.toml`.
 * Update `RELEASES.md`.
 * Publish in crates.io with `cargo publish`.
