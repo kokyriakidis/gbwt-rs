@@ -15,6 +15,9 @@
 //! > **Lightweight algorithms for constructing and inverting the BWT of string collections**.\
 //! > Theoretical Computer Science 483:134–148, 2013.
 //! > DOI: [10.1016/j.tcs.2012.02.002](https://doi.org/10.1016/j.tcs.2012.02.002)
+//!
+//! NOTE: The integrated tests using `cargo test` only cover small instances.
+//! If the construction logic is modified, it should be tested with the `rebuild-gbwt` binary against existing GBWT indexes.
 
 use crate::{ENDMARKER, SOURCE_KEY, SOURCE_VALUE};
 use crate::{GBWT, Pos, FullPathName, Metadata, MetadataBuilder};
@@ -422,6 +425,7 @@ pub struct MutableGBWT {
     endmarker: Vec<Pos>,
     // Outgoing edges from the endmarker as (node id, number of sequences starting with that node).
     endmarker_edges: EdgeList,
+    // FIXME: Would Box<MutableRecord> be more efficient here?
     // Other records as a map from node id to mutable record.
     records: BTreeMap<usize, MutableRecord>,
     // Optional metadata.
@@ -585,9 +589,30 @@ impl MutableGBWT {
         }
     }
 
-    // Appends sequence starts to the endmarker record, determines the GBWT positions,
-    // and updates the incoming edges of the first nodes.
-    fn append_sequence_starts(&mut self, sequences: &mut [Sequence]) {
+    // Recomputes the offsets in the outgoing edges from predecessors to the given node.
+    fn recompute_outgoing_edges(
+        records: &mut BTreeMap<usize, MutableRecord>,
+        endmarker_edges: &EdgeList,
+        to: usize
+    ) {
+        let mut offset = 0;
+        let successor = records.get(&to).unwrap();
+        let incoming: Vec<Pos> = successor.incoming.iter().collect();
+        for edge in incoming {
+            if edge.node == ENDMARKER {
+                // The offset is always 0 in an outgoing edge from the endmarker.
+                offset += endmarker_edges.get(to).unwrap_or(0) as usize;
+            } else {
+                let predecessor = records.get_mut(&(edge.node)).unwrap();
+                predecessor.set_edge_offset(to, offset);
+                offset += edge.offset;
+            }
+        }
+    }
+
+    // Special logic for iteration -1, with the current position at the endmarker
+    // and the next position at the first node.
+    fn handle_sequence_starts<'a>(&mut self, sequences: &'a mut [Sequence<'a>]) -> &'a mut [Sequence<'a>] {
         for (i, sequence) in sequences.iter_mut().enumerate() {
             sequence.curr = SmallPos::new(ENDMARKER, i);
             let start = sequence.nodes.first().copied().unwrap_or(ENDMARKER as u32) as usize;
@@ -596,9 +621,21 @@ impl MutableGBWT {
             sequence.next = pos;
             self.endmarker.push(Pos::from(pos));
         }
-        for edge in self.endmarker_edges.iter().filter(|edge| edge.node != ENDMARKER) {
-            self.records.entry(edge.node).or_default().set_visits(ENDMARKER, edge.offset);
+
+        let active_sequences = self.sort_sequences(sequences);
+        let mut next = 0; // We never use the offsets in outgoing edges to the endmarker.
+        for sequence in active_sequences.iter() {
+            if sequence.next.node == next {
+                continue;
+            }
+            next = sequence.next.node;
+            let visits = self.endmarker_edges.get(next as usize).unwrap_or(0) as usize;
+            self.records.entry(next as usize).or_default().set_visits(ENDMARKER, visits);
+            Self::recompute_outgoing_edges(&mut self.records, &self.endmarker_edges, next as usize);
         }
+        self.advance_sequences(active_sequences, 0);
+
+        active_sequences
     }
 
     // Inserts `next.node` to record offset `curr.offset` for node `curr.node` in the GBWT.
@@ -619,7 +656,7 @@ impl MutableGBWT {
                         // This can only fail if MutableGBWT is in an inconsistent state.
                         let result = run_iter.next();
                         if result.is_none() {
-                            panic!("MutableGBWT: Existing runs did not reach the inserted position {} in node {}", seq.curr.offset, curr);
+                            panic!("MutableGBWT: Existing runs ended at position {} in node {}; inserted position is {}", new_bwt.target_len, curr, seq.curr.offset);
                         }
                         remaining = result.unwrap();
                     }
@@ -693,19 +730,7 @@ impl MutableGBWT {
                 continue;
             }
             next = sequence.next.node;
-            let mut offset = 0;
-            let successor = self.records.get(&(next as usize)).unwrap();
-            let incoming: Vec<Pos> = successor.incoming.iter().collect();
-            for edge in incoming {
-                if edge.node == ENDMARKER {
-                    // The offset is always 0 in an outgoing edge from the endmarker.
-                    offset += self.endmarker_edges.get(edge.node).unwrap_or(0) as usize;
-                } else {
-                    let predecessor = self.records.get_mut(&(edge.node)).unwrap();
-                    predecessor.set_edge_offset(next as usize, offset);
-                    offset += edge.offset;
-                }
-            }
+            Self::recompute_outgoing_edges(&mut self.records, &self.endmarker_edges, next as usize);
         }
 
         for sequence in sequences.iter_mut() {
@@ -747,13 +772,12 @@ impl MutableGBWT {
     ///
     /// Does not modify the GBWT if an error is returned.
     pub fn insert(&mut self, buffer: &[u32], names: Option<&[FullPathName]>) -> Result<(), String> {
-        // Only these steps may fail, and the failure happens before we actually modify the metadata.
+        // Only these steps can fail, and the failure happens before we actually modify the metadata.
         let mut sequences = self.sequences_in_buffer(buffer)?;
         self.append_metadata(sequences.len(), names)?;
 
-        self.append_sequence_starts(&mut sequences);
-        let mut active_sequences = self.sort_sequences(&mut sequences);
-        self.advance_sequences(active_sequences, 0);
+        // Special logic for the endmarker at the start.
+        let mut active_sequences = self.handle_sequence_starts(&mut sequences);
         self.len += buffer.len();
 
         // Invariants:
@@ -843,14 +867,30 @@ pub fn compare_gbwts(index: &GBWT, truth: &GBWT, test_case: &str) -> Result<(), 
         return Err(format!("GBWT tags do not match ({})", test_case));
     }
     if index.bwt != truth.bwt {
-        return Err(format!("GBWT BWTs do not match ({})", test_case));
+        if index.bwt.len() != truth.bwt.len() {
+            return Err(format!("GBWT BWT lengths do not match ({}): {} vs {}", test_case, index.bwt.len(), truth.bwt.len()));
+        }
+        let mut mismatching_records = 0;
+        let mut first_mismatch = None;
+        for (i, (record, truth_record)) in index.bwt.iter().zip(truth.bwt.iter()).enumerate() {
+            if record != truth_record {
+                mismatching_records += 1;
+                if first_mismatch.is_none() {
+                    first_mismatch = Some(i);
+                }
+            }
+        }
+        return Err(format!(
+            "GBWT BWT records do not match ({}): {} mismatches out of {}, first mismatch at record {:?}",
+            test_case, mismatching_records, index.bwt.len(), first_mismatch
+        ));
     }
     // While the truth is derived from the BWT, the endmarker in a built index
     // was created independently.
     if index.endmarker != truth.endmarker {
         return Err(format!("GBWT endmarker records do not match ({})", test_case));
     }
-    // We do not compara DA samples, as only the C++ implementation currently builds them.
+    // We do not compare DA samples, as only the C++ implementation currently builds them.
     if index.metadata != truth.metadata {
         return Err(format!("GBWT metadata do not match ({})", test_case));
     }
@@ -1344,6 +1384,10 @@ mod tests {
             assert!(result.is_ok(), "{}", result.unwrap_err());
         }
     }
+
+    // FIXME: test case with partially overlapping paths in an arbitrary order
+    // take a path 2, 4, 6, 8..., take all subpaths, and shuffle
+    // FIXME: also for MutableGBWT
 
     #[test]
     fn gbwt_builder_insert_empty() {
