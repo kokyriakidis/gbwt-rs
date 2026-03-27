@@ -25,9 +25,9 @@ use crate::bwt::{BWT, BWTBuilder, SmallPos};
 use crate::headers::{Header, GBWTPayload};
 use crate::support::{self, Run, SmallRun, Tags, EdgeList};
 
-use std::collections::BTreeMap;
 use std::sync::mpsc::{SyncSender, Receiver};
 use std::thread::JoinHandle;
+use std::cmp;
 
 //-----------------------------------------------------------------------------
 
@@ -401,7 +401,6 @@ impl RunBuilder {
 ///
 /// assert_eq!(builder.len(), 16);
 /// assert_eq!(builder.sequences(), 4);
-/// assert_eq!(builder.nodes(), 6);
 /// assert_eq!(builder.sequence(2), Some(vec![1, 4, 5]));
 ///
 /// // Convert to GBWT.
@@ -425,12 +424,11 @@ pub struct MutableGBWT {
     endmarker: Vec<Pos>,
     // Outgoing edges from the endmarker as (node id, number of sequences starting with that node).
     endmarker_edges: EdgeList,
-    // FIXME: Array of Option<Box<MutableRecord>> would be faster
-    // Other records as a map from node id to mutable record.
-    // We use `Box` to make the construction faster and more space-efficient.
-    // Each `MutableRecord` is 96 bytes + possible heap allocations.
-    // B-tree nodes have space for 11 entries, out of which 3 are empty on the average.
-    records: BTreeMap<usize, Box<MutableRecord>>,
+    // Node identifier for record 0. This is `header.offset + 1`.
+    first_node: usize,
+    // Node records as a map from `node id - first_node` to mutable record.
+    // We use `Option<Box<_>>` to minimize the overhead from resizing `records`.
+    records: Vec<Option<Box<MutableRecord>>>,
     // Optional metadata.
     metadata: Option<MetadataBuilder>,
 }
@@ -457,19 +455,22 @@ impl MutableGBWT {
         self.metadata.is_some()
     }
 
-    /// Returns the total number of nodes, excluding the endmarker.
-    pub fn nodes(&self) -> usize {
-        self.records.len()
-    }
-
     /// Returns the minimum node identifier, or [`None`] if there are no nodes.
     pub fn min_node(&self) -> Option<usize> {
-        self.records.keys().next().copied()
+        if self.records.is_empty() {
+            None
+        } else {
+            Some(self.first_node)
+        }
     }
 
     /// Returns the maximum node identifier, or [`None`] if there are no nodes.
     pub fn max_node(&self) -> Option<usize> {
-        self.records.keys().next_back().copied()
+        if self.records.is_empty() {
+            None
+        } else {
+            Some(self.first_node + self.records.len() - 1)
+        }
     }
 
     /// Returns the total number of sequences.
@@ -508,7 +509,7 @@ impl MutableGBWT {
         let mut pos = self.endmarker[sequence_id];
         while pos.node != ENDMARKER {
             result.push(pos.node as u32);
-            let record = self.records.get(&pos.node)?;
+            let record = self.records.get(pos.node as usize - self.first_node)?.as_ref()?;
             pos = record.follow_path(pos.offset)?;
         }
 
@@ -547,15 +548,17 @@ impl MutableGBWT {
             tags,
             endmarker: Vec::new(),
             endmarker_edges: EdgeList::new(),
-            records: BTreeMap::new(),
+            first_node: 0,
+            records: Vec::new(),
             metadata: if with_metadata { Some(MetadataBuilder::new()) } else { None },
         }
     }
 
     // Returns the sequences in the buffer without determining the GBWT positions.
-    fn sequences_in_buffer<'a>(&'_ self, buffer: &'a [u32]) -> Result<Vec<Sequence<'a>>, String> {
+    fn sequences_in_buffer<'a>(&'_ mut self, buffer: &'a [u32]) -> Result<(Vec<Sequence<'a>>, Option<(usize, usize)>), String> {
         let mut sequences: Vec<Sequence<'a>> = Vec::new();
         let mut start = 0;
+        let mut node_range = None;
         for (i, &node) in buffer.iter().enumerate() {
             if node == ENDMARKER as u32 {
                 sequences.push(Sequence {
@@ -564,6 +567,18 @@ impl MutableGBWT {
                     next: SmallPos::default(),
                 });
                 start = i + 1;
+            } else {
+                let node = node as usize;
+                if let Some((min, max)) = node_range {
+                    if node < min {
+                        node_range = Some((node, max));
+                    }
+                    if node > max {
+                        node_range = Some((min, node));
+                    }
+                } else {
+                    node_range = Some((node, node));
+                }
             }
         }
         if start < buffer.len() {
@@ -572,7 +587,8 @@ impl MutableGBWT {
         if self.bidirectional && !sequences.len().is_multiple_of(2) {
             return Err(String::from("MutableGBWT: Odd number of sequences in the buffer for a bidirectional GBWT"));
         }
-        Ok(sequences)
+
+        Ok((sequences, node_range))
     }
 
     // Appends the given path names to the metadata.
@@ -592,21 +608,45 @@ impl MutableGBWT {
         }
     }
 
+    // Ensures that `self.records` covers node ids from `min_node` to `max_node`.
+    fn expand_records(&mut self, min_node: usize, max_node: usize) {
+        if self.records.is_empty() {
+            self.first_node = min_node;
+            self.records = vec![None; max_node - min_node + 1];
+        } else if min_node < self.first_node || max_node >= self.first_node + self.records.len() {
+            let new_first_node = cmp::min(min_node, self.first_node);
+            let new_last_node = cmp::max(max_node, self.first_node + self.records.len() - 1);
+            let mut new_records = Vec::with_capacity(new_last_node - new_first_node + 1);
+            for _ in new_first_node..self.first_node {
+                new_records.push(None);
+            }
+            for record in self.records.iter_mut() {
+                new_records.push(record.take());
+            }
+            while new_records.len() < new_last_node - new_first_node + 1 {
+                new_records.push(None);
+            }
+            self.first_node = new_first_node;
+            self.records = new_records;
+        }
+    }
+
     // Recomputes the offsets in the outgoing edges from predecessors to the given node.
     fn recompute_outgoing_edges(
-        records: &mut BTreeMap<usize, Box<MutableRecord>>,
         endmarker_edges: &EdgeList,
+        first_node: usize,
+        records: &mut [Option<Box<MutableRecord>>],
         to: usize
     ) {
         let mut offset = 0;
-        let successor = records.get(&to).unwrap();
+        let successor = records[to - first_node].as_ref().unwrap();
         let incoming: Vec<Pos> = successor.incoming.iter().collect();
         for edge in incoming {
             if edge.node == ENDMARKER {
                 // The offset is always 0 in an outgoing edge from the endmarker.
                 offset += endmarker_edges.get(to).unwrap_or(0) as usize;
             } else {
-                let predecessor = records.get_mut(&(edge.node)).unwrap();
+                let predecessor = records[edge.node as usize - first_node].as_mut().unwrap();
                 predecessor.set_edge_offset(to, offset);
                 offset += edge.offset;
             }
@@ -626,15 +666,15 @@ impl MutableGBWT {
         }
 
         let active_sequences = self.sort_sequences(sequences);
-        let mut next = 0; // We never use the offsets in outgoing edges to the endmarker.
+        let mut next = ENDMARKER as u32; // We never use the offsets in outgoing edges to the endmarker.
         for sequence in active_sequences.iter() {
             if sequence.next.node == next {
                 continue;
             }
             next = sequence.next.node;
             let visits = self.endmarker_edges.get(next as usize).unwrap_or(0) as usize;
-            self.records.entry(next as usize).or_default().set_visits(ENDMARKER, visits);
-            Self::recompute_outgoing_edges(&mut self.records, &self.endmarker_edges, next as usize);
+            self.records[next as usize - self.first_node].get_or_insert_default().set_visits(ENDMARKER, visits);
+            Self::recompute_outgoing_edges(&self.endmarker_edges, self.first_node, &mut self.records, next as usize);
         }
         self.advance_sequences(active_sequences, 0);
 
@@ -648,7 +688,7 @@ impl MutableGBWT {
         let mut i = 0;
         while i < sequences.len() {
             let curr = sequences[i].curr.node;
-            let current = self.records.get_mut(&(curr as usize)).unwrap();
+            let current = self.records[curr as usize - self.first_node].as_mut().unwrap();
             let mut run_iter = current.bwt.iter().copied();
             let mut remaining = SmallRun::default();
             let mut new_bwt = RunBuilder::new();
@@ -659,7 +699,10 @@ impl MutableGBWT {
                         // This can only fail if MutableGBWT is in an inconsistent state.
                         let result = run_iter.next();
                         if result.is_none() {
-                            panic!("MutableGBWT: Existing runs ended at position {} in node {}; inserted position is {}", new_bwt.target_len, curr, seq.curr.offset);
+                            panic!(
+                                "MutableGBWT: Existing runs ended at position {} in node {}; inserted position is {}",
+                                new_bwt.target_len, curr, seq.curr.offset
+                            );
                         }
                         remaining = result.unwrap();
                     }
@@ -695,17 +738,17 @@ impl MutableGBWT {
             if i > 0 && node_pairs[i - 1] == (from, to) {
                 continue;
             }
-            let predecessor = self.records.get_mut(&(from as usize)).unwrap();
+            let predecessor = self.records[from as usize - self.first_node].as_mut().unwrap();
             predecessor.add_edge(to as usize);
         }
 
-        // Ensure that the successor records exist and increment the visits.
+        // Ensure that successor records exist and increment the visits.
         node_pairs.sort_unstable_by_key(|&(_, to)| to);
         let mut start = 0;
         for (i, &(from, to)) in node_pairs.iter().enumerate() {
             if i + 1 >= node_pairs.len() || node_pairs[i + 1] != (from, to) {
                 if to != ENDMARKER as u32 {
-                    let successor = self.records.entry(to as usize).or_default();
+                    let successor = self.records[to as usize - self.first_node].get_or_insert_default();
                     successor.add_visits(from as usize, i - start + 1);
                 }
                 start = i + 1;
@@ -733,11 +776,11 @@ impl MutableGBWT {
                 continue;
             }
             next = sequence.next.node;
-            Self::recompute_outgoing_edges(&mut self.records, &self.endmarker_edges, next as usize);
+            Self::recompute_outgoing_edges(&self.endmarker_edges, self.first_node, &mut self.records, next as usize);
         }
 
         for sequence in sequences.iter_mut() {
-            let current = self.records.get(&(sequence.curr.node as usize)).unwrap();
+            let current = self.records[sequence.curr.node as usize - self.first_node].as_ref().unwrap();
             let start_offset = current.outgoing.get(sequence.next.node as usize).unwrap_or(0);
             // The offset was the rank of `next.node` at offset `curr.offset`.
             sequence.next.offset += start_offset;
@@ -776,8 +819,12 @@ impl MutableGBWT {
     /// Does not modify the GBWT if an error is returned.
     pub fn insert(&mut self, buffer: &[u32], names: Option<&[FullPathName]>) -> Result<(), String> {
         // Only these steps can fail, and the failure happens before we actually modify the metadata.
-        let mut sequences = self.sequences_in_buffer(buffer)?;
+        let (mut sequences, node_range) = self.sequences_in_buffer(buffer)?;
         self.append_metadata(sequences.len(), names)?;
+
+        if let Some((min_node, max_node)) = node_range {
+            self.expand_records(min_node, max_node);
+        }
 
         // Special logic for the endmarker at the start.
         let mut active_sequences = self.handle_sequence_starts(&mut sequences);
@@ -827,7 +874,7 @@ impl From<MutableGBWT> for GBWT {
         // Encode the BWT, including the endmarker record.
         let mut bwt_builder = BWTBuilder::new(&builder.endmarker_edges, &builder.endmarker);
         for node_id in (header.payload().offset + 1)..header.payload().alphabet_size {
-            if let Some(record) = builder.records.get(&node_id) {
+            if let Some(record) = builder.records[node_id - builder.first_node].as_ref() {
                 bwt_builder.append(&record.outgoing, record.bwt.iter().map(|&run| Run::from(run)));
             } else {
                 bwt_builder.append_empty();
@@ -1148,7 +1195,6 @@ mod tests {
                 }
             }
         }
-        assert_eq!(builder.nodes(), nodes.len(), "MutableGBWT should have correct node count ({})", test_case);
 
         let sequence_count = if builder.is_bidirectional() { paths.len() * 2 } else { paths.len() };
         assert_eq!(builder.sequences(), sequence_count, "MutableGBWT should have correct sequence count ({})", test_case);
