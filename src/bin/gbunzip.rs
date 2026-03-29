@@ -205,6 +205,8 @@ fn write_gfa_header<T: Write>(gbz: &GBZ, output: &mut T) -> io::Result<()> {
 fn write_gfa_impl<T: Write + Send>(gbz: &GBZ, output: T, config: &Config) -> io::Result<()> {
     let mut buffer = BufWriter::with_capacity(config.buffer_size, output);
     write_gfa_header(gbz, &mut buffer)?;
+    // FIXME: We should output pggname information, but that functionality is currently
+    // in a separate crate that depends on gbz.
     write_segments(gbz, &mut buffer, config)?;
     write_links(gbz, &mut buffer, config)?;
 
@@ -218,6 +220,7 @@ fn write_gfa_impl<T: Write + Send>(gbz: &GBZ, output: T, config: &Config) -> io:
         },
         PathMode::RefOnly => {
             write_paths(gbz, &mut buffer, config)?;
+            write_ref_walks(gbz, &mut buffer, config)?;
         },
     }
 
@@ -326,8 +329,8 @@ fn write_link<T: Write>(from: (&[u8], Orientation), to: (&[u8], Orientation), ou
     }
     output.write_all(to.0)?;
     match to.1 {
-        Orientation::Forward => output.write_all(b"\t+\t*\n"),
-        Orientation::Reverse => output.write_all(b"\t-\t*\n"),
+        Orientation::Forward => output.write_all(b"\t+\t0M\n"),
+        Orientation::Reverse => output.write_all(b"\t-\t0M\n"),
     }
 }
 
@@ -345,7 +348,7 @@ fn write_paths<T: Write + Send>(gbz: &GBZ, output: &mut T, config: &Config) -> i
     let metadata = gbz.metadata().unwrap();
     let ref_sample = metadata.sample_id(GENERIC_SAMPLE);
     if ref_sample.is_none() {
-        eprintln!("No named paths in the graph");
+        eprintln!("No generic paths in the graph");
         return Ok(());
     }
     let ref_sample = ref_sample.unwrap();
@@ -353,7 +356,7 @@ fn write_paths<T: Write + Send>(gbz: &GBZ, output: &mut T, config: &Config) -> i
         eprintln!("Writing paths");
     }
 
-    // Determine the identifiers of named paths and write them as P-lines.
+    // Determine the identifiers of generic paths and write them as P-lines.
     let mut paths: Vec<usize> = Vec::new();
     for (path_id, path_name) in metadata.path_iter().enumerate() {
         if path_name.sample() == ref_sample {
@@ -412,6 +415,30 @@ fn write_walks<T: Write + Send>(gbz: &GBZ, output: &mut T, config: &Config) -> i
 
     if config.verbose {
         eprintln!("Wrote {} walks in {:.3} seconds", paths.len(), start.elapsed().as_secs_f64());
+    }
+    Ok(())
+}
+
+fn write_ref_walks<T: Write + Send>(gbz: &GBZ, output: &mut T, config: &Config) -> io::Result<()> {
+    let start = Instant::now();
+    let ref_samples = gbz.reference_sample_ids(false);
+    if config.verbose {
+        eprintln!("Writing reference walks");
+    }
+
+    // Determine the identifiers of haplotype paths and write them as W-lines.
+    // We assume that the number of reference samples is small.
+    let metadata = gbz.metadata().unwrap();
+    let mut paths: Vec<usize> = Vec::new();
+    for (path_id, path_name) in metadata.path_iter().enumerate() {
+        if ref_samples.contains(&path_name.sample()) {
+            paths.push(path_id);
+        }
+    }
+    write_lines(gbz, &paths, output, config, LineType::WLine)?;
+
+    if config.verbose {
+        eprintln!("Wrote {} reference walks in {:.3} seconds", paths.len(), start.elapsed().as_secs_f64());
     }
     Ok(())
 }
