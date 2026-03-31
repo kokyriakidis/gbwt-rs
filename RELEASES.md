@@ -1,6 +1,6 @@
 # Releases
 
-## Current version
+## GBZ 0.6.0 (2026-03-30)
 
 * GBWT construction:
   * Insert batches of sequences into `MutableGBWT` and convert it to `GBWT`.
