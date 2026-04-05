@@ -212,7 +212,7 @@ fn select_paths(gbz: &GBZ, metadata: &Metadata, config: &Config) -> Result<Vec<u
     if !metadata.has_contig_names() {
         return Err("Cannot select a contig without contig names".to_string());
     }
-    let contig_id = metadata.contig_id(contig).ok_or(format!("The graph does not contain contig {}", contig))?;
+    let contig_id = metadata.contig_id(contig).ok_or_else(|| format!("The graph does not contain contig {}", contig))?;
     let mut initial_paths: Vec<usize> = Vec::new();
     for (path_id, path_name) in metadata.path_iter().enumerate() {
         if path_name.contig() == contig_id {
@@ -264,7 +264,7 @@ fn select_paths(gbz: &GBZ, metadata: &Metadata, config: &Config) -> Result<Vec<u
 }
 
 fn extract_sequences(gbz: &GBZ, config: &Config) -> Result<(), String> {
-    let metadata = gbz.metadata().ok_or("Sequence extraction requires GBWT metadata".to_string())?;
+    let metadata = gbz.metadata().ok_or_else(|| "Sequence extraction requires GBWT metadata".to_string())?;
     if !metadata.has_path_names() {
         return Err("Sequence extraction requires path names".to_string());
     }
@@ -306,9 +306,9 @@ fn read_names(config: &Config) -> Result<Vec<(usize, usize, usize)>, String> {
     for line in BufReader::new(file).lines() {
         let line = line.map_err(|e| e.to_string())?;
         let mut fields = line.split('\t');
-        let first = fields.next().ok_or("Name line missing first field".to_string())?;
+        let first = fields.next().ok_or_else(|| "Name line missing first field".to_string())?;
         let id = first.parse::<usize>().map_err(|e| e.to_string())?;
-        let last = fields.next_back().ok_or("Name line missing last field".to_string())?;
+        let last = fields.next_back().ok_or_else(|| "Name line missing last field".to_string())?;
         let len = last.parse::<usize>().map_err(|e| e.to_string())?;
         result.push((id, len, offset));
         offset += len + 1;
@@ -407,7 +407,7 @@ fn count_bwt_runs(expected_len: usize, config: &Config) -> Result<(), String> {
 
 fn extract_tag_array(gbz: &GBZ, config: &Config) -> Result<(), String> {
     let names = read_names(config)?;
-    let last = names.last().ok_or("No path names found".to_string())?;
+    let last = names.last().ok_or_else(|| "No path names found".to_string())?;
     let expected_len = last.1 + last.2 + 1;
     if config.verbose {
         eprintln!("Found {} paths; expected file size {}", names.len(), expected_len);
