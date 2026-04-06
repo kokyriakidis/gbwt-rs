@@ -8,7 +8,7 @@ use gbz::{GENERIC_SAMPLE, REFERENCE_SAMPLES_KEY};
 use gbz::internal;
 
 use simple_sds::serialize::Serialize;
-use simple_sds::serialize;
+use simple_sds::{binaries, serialize};
 
 use std::fs::OpenOptions;
 use std::io::{Write, BufWriter};
@@ -38,7 +38,7 @@ fn main() -> Result<(), String> {
         return Err("GFA decompression requires path names".to_string());
     }
     if config.verbose {
-        let (size, units) = internal::readable_size(gbz.size_in_bytes());
+        let (size, units) = binaries::human_readable_size(gbz.size_in_bytes());
         eprintln!("GBZ size: {:.3} {}", size, units);
         eprintln!();
     }
@@ -100,7 +100,7 @@ impl Config {
         let program = args[0].clone();
 
         let mut opts = Options::new();
-        opts.optopt("b", "buffer-size", "output buffer size in megabytes (default 8)", "INT");
+        opts.optopt("b", "buffer-size", "output buffer size (default 8 MiB)", "INT");
         opts.optflag("h", "help", "print this help");
         opts.optflag("l", "load-gbz", "load the GBZ for benchmarking");
         opts.optopt("o", "output", "write the GFA to a file instead of stdout", "FILE");
@@ -119,12 +119,12 @@ impl Config {
             verbose: false,
         };
         if let Some(s) = matches.opt_str("b") {
-            match s.parse::<usize>() {
+            match binaries::parse_unsigned(&s) {
                 Ok(n) => {
-                    if n == 0 {
-                        return Err("--buffer-size: buffer size must be > 0".to_string());
+                    if n < 1_048_576 {
+                        return Err("--buffer-size: buffer size must be >= 1 MiB".to_string());
                     }
-                    config.buffer_size = n * 1048576;
+                    config.buffer_size = n;
                 },
                 Err(f) => {
                     return Err(format!("--buffer-size: {}", f));

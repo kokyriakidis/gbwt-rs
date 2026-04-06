@@ -7,7 +7,7 @@ use gbz::{GBWT, Pos};
 use gbz::internal;
 
 use simple_sds::serialize::Serialize;
-use simple_sds::serialize;
+use simple_sds::{binaries, serialize};
 
 use std::time::Instant;
 use std::{env, process};
@@ -23,7 +23,7 @@ fn main() {
     let filename = config.filename.as_ref().unwrap();
     eprintln!("Loading GBWT index {}", filename);
     let index: GBWT = serialize::load_from(filename).unwrap();
-    let (size, units) = internal::readable_size(index.size_in_bytes());
+    let (size, units) = binaries::human_readable_size(index.size_in_bytes());
     eprintln!("Index size: {:.3} {}", size, units);
     if index.is_empty() {
         eprintln!("Cannot perform benchmarks with an empty index");
@@ -77,7 +77,7 @@ impl Config {
             process::exit(0);
         }
         if let Some(s) = matches.opt_str("n") {
-            match s.parse::<usize>() {
+            match binaries::parse_unsigned(&s) {
                 Ok(n) => {
                     if n == 0 {
                         eprintln!("--queries: number of queries must be non-zero");
@@ -92,7 +92,7 @@ impl Config {
             }
         }
         if let Some(s) = matches.opt_str("l") {
-            match s.parse::<usize>() {
+            match binaries::parse_unsigned(&s) {
                 Ok(n) => {
                     if n == 0 {
                         eprintln!("--query-len: query length must be non-zero");

@@ -1,57 +1,6 @@
 use std::time::Duration;
 
-//-----------------------------------------------------------------------------
-
-pub fn readable_size(bytes: usize) -> (f64, &'static str) {
-    let units: Vec<(f64, &'static str)> = vec![
-        (1.0, "B"),
-        (1024.0, "KiB"),
-        (1024.0 * 1024.0, "MiB"),
-        (1024.0 * 1024.0 * 1024.0, "GiB"),
-        (1024.0 * 1024.0 * 1024.0 * 1024.0, "TiB"),
-    ];
-
-    let value = bytes as f64;
-    let mut unit = units[0];
-    for next in units.iter().skip(1) {
-        if value >= next.0 {
-            unit = *next;
-        } else {
-            break;
-        }
-    }
-
-    (value / unit.0, unit.1)
-}
-
-#[cfg(target_os = "linux")]
-pub fn peak_memory_usage() -> Result<usize, String> {
-    unsafe {
-        let mut rusage: libc::rusage = std::mem::zeroed();
-        let retval = libc::getrusage(libc::RUSAGE_SELF, &mut rusage as *mut _);
-        match retval {
-            0 => Ok(rusage.ru_maxrss as usize * 1024),
-            val => Err(format!("libc::getrusage call failed with return value {}", val)),
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub fn peak_memory_usage() -> Result<usize, String> {
-    unsafe {
-        let mut rusage: libc::rusage = std::mem::zeroed();
-        let retval = libc::getrusage(libc::RUSAGE_SELF, &mut rusage as *mut _);
-        match retval {
-            0 => Ok(rusage.ru_maxrss as usize),
-            val => Err(format!("libc::getrusage call failed with return value {}", val)),
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn peak_memory_usage() -> Result<usize, String> {
-    Err(String::from("No peak_memory_usage implementation for this OS"))
-}
+use simple_sds::binaries;
 
 //-----------------------------------------------------------------------------
 
@@ -65,9 +14,9 @@ pub fn report_results(queries: usize, total_len: usize, total_occs: usize, durat
 }
 
 pub fn report_memory_usage() {
-    match peak_memory_usage() {
+    match binaries::peak_memory_usage() {
         Ok(bytes) => {
-            let (size, unit) = readable_size(bytes);
+            let (size, unit) = binaries::human_readable_size(bytes);
             eprintln!("Peak memory usage: {:.3} {}", size, unit);
         },
         Err(f) => {

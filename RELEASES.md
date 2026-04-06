@@ -1,5 +1,9 @@
 # Releases
 
+## Current version
+
+* Command line arguments can use suffixes (e.g. `k`, `MiB`) for sizes and counts that can plausibly be large.
+
 ## GBZ 0.6.0 (2026-03-30)
 
 * GBWT construction:

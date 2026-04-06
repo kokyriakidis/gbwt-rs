@@ -7,6 +7,7 @@ use gbz::{GBWT, GBWTBuilder};
 use gbz::FullPathName;
 use gbz::internal;
 
+use simple_sds::binaries;
 use simple_sds::serialize::{self, Serialize};
 
 use std::time::Instant;
@@ -23,7 +24,7 @@ fn main() -> Result<(), String> {
     let filename = config.filename.as_ref().unwrap();
     eprintln!("Loading GBWT index {}", filename);
     let truth: GBWT = serialize::load_from(filename).map_err(|e| format!("Failed to load GBWT index: {}", e))?;
-    let (size, units) = internal::readable_size(truth.size_in_bytes());
+    let (size, units) = binaries::human_readable_size(truth.size_in_bytes());
     eprintln!("{} sequences of total length {}; index size {:.3} {}", truth.sequences(), truth.len(), size, units);
 
     // Construction.
@@ -71,7 +72,7 @@ impl Config {
 
         let mut opts = Options::new();
         opts.optflag("h", "help", "print this help");
-        opts.optopt("b", "buffer", "buffer size in nodes (can use K, M, G; default: 100M)", "NODES");
+        opts.optopt("b", "buffer", "buffer size in nodes (default: 100M)", "INT");
         let matches = match opts.parse(&args[1..]) {
             Ok(m) => m,
             Err(f) => {
@@ -91,10 +92,10 @@ impl Config {
             process::exit(0);
         }
         if let Some(arg) = matches.opt_str("b") {
-            config.buffer_size = match Self::parse_buffer_size(&arg) {
+            config.buffer_size = match binaries::parse_unsigned(&arg) {
                 Ok(size) => size,
                 Err(e) => {
-                    eprintln!("{}", e);
+                    eprintln!("--buffer: {}", e);
                     process::exit(1);
                 }
             };
@@ -108,36 +109,6 @@ impl Config {
             eprint!("{}", opts.usage(&header));
             process::exit(1);
         }
-    }
-
-    fn parse_buffer_size(arg: &str) -> Result<usize, String> {
-        // The argument should be a number followed by an optional suffix
-        // (K, M, G in either case).
-        let mut number_str = String::new();
-        let mut suffix: Option<char> = None;
-        for c in arg.chars() {
-            if c.is_ascii_digit() {
-                number_str.push(c);
-            } else {
-                if suffix.is_some() {
-                    return Err(format!("Invalid buffer size: {}", arg));
-                }
-                suffix = Some(c);
-            }
-        }
-
-        let mut number: usize = number_str.parse().map_err(|_| format!("Invalid buffer size: {}", arg))?;
-        if let Some(c) = suffix {
-            let multiplier = match c.to_ascii_uppercase() {
-                'K' => 1000,
-                'M' => 1_000_000,
-                'G' => 1_000_000_000,
-                _ => return Err(format!("Invalid buffer size: {}", arg)),
-            };
-            number *= multiplier;
-        }
-
-        Ok(number)
     }
 }
 
