@@ -1961,7 +1961,7 @@ impl Chains {
     fn head_tail_nodes(&self) -> BTreeSet<usize> {
         let mut result = BTreeSet::new();
         for &handle in self.next.keys() {
-            if self.next.get(&flip_node(handle)).is_none() {
+            if !self.next.contains_key(&flip_node(handle)) {
                 result.insert(handle);
             }
         }

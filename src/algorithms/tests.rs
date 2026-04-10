@@ -1,10 +1,9 @@
 use super::*;
 
 use crate::Orientation;
+use crate::support::Chains;
 use rand::Rng;
 use simple_sds::serialize;
-
-//use simple_sds::serialize;
 
 //-----------------------------------------------------------------------------
 
@@ -275,6 +274,20 @@ fn similar_sequences_lcs() {
     similar_sequences(100, 5, 10, 0.02);
     similar_sequences(1000, 10, 15, 0.01);
     similar_sequences(10000, 15, 20, 0.005);
+}
+
+//-----------------------------------------------------------------------------
+
+#[test]
+fn find_chains_test() {
+    let graph: GBZ = serialize::load_from(&support::get_test_data("micb-kir3dl1.gbz")).unwrap();
+    let expected: Chains = serialize::load_from(&support::get_test_data("micb-kir3dl1.chains")).unwrap();
+    let result = find_chains(&graph);
+
+    assert_eq!(result.len(), expected.len(), "Number of chains differs");
+    assert_eq!(result.links(), expected.links(), "Number of links differs");
+    assert!(result.iter().eq(expected.iter()), "Link iterators differ");
+    assert_eq!(result, expected, "Internal chain structures differ");
 }
 
 //-----------------------------------------------------------------------------
