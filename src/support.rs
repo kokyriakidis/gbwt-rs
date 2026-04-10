@@ -13,7 +13,7 @@ use zstd::stream::Encoder as ZstdEncoder;
 use zstd::stream::Decoder as ZstdDecoder;
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, BTreeSet};
 use std::collections::btree_map::Iter as TagIter;
 use std::collections::hash_map::Entry;
 use std::convert::TryFrom;
@@ -1947,6 +1947,49 @@ impl Chains {
         Ok(next)
     }
 
+    // Converts the link map back to chains.
+    fn links_to_chains(&self) -> Vec<IntVector> {
+        // Collect the head/tail nodes in the orientation pointing inward.
+        let mut active: BTreeSet<usize> = BTreeSet::new();
+        for &handle in self.next.keys() {
+            if self.next(flip_node(handle)).is_none() {
+                active.insert(handle);
+            }
+        }
+
+        // Iterate over all chains, starting from the smallest remaining head/tail.
+        let mut result = Vec::new();
+        while let Some(head) = active.first().copied() {
+            let mut path = vec![head];
+            let mut curr = head;
+            let mut max = head;
+            while let Some(next) = self.next(curr) {
+                path.push(next);
+                curr = next;
+                if next > max {
+                    max = next;
+                }
+            }
+            if let Some(head) = path.first() {
+                active.remove(head);
+            }
+            if let Some(tail) = path.last() {
+                active.remove(&flip_node(*tail));
+            }
+
+            // Encode the path in the canonical orientation.
+            if !encoded_path_is_canonical(&path) {
+                reverse_path_in_place(&mut path);
+            }
+            let width = simple_sds::bits::bit_len(max as u64);
+            let mut packed = IntVector::with_capacity(path.len(), width).unwrap();
+            packed.extend(path);
+            result.push(packed);
+        }
+
+        result
+    }
+
     /// Creates an empty set of chains.
     pub fn new() -> Self {
         Self::default()
@@ -1998,11 +2041,16 @@ impl Serialize for Chains {
         self.chains.serialize(writer)
     }
 
-    fn serialize_body<T: Write>(&self, _: &mut T) -> io::Result<()> {
-        // FIXME
-        // let data = Self::links_to_chains()
-        // serialize each chain in data
-        unimplemented!()
+    fn serialize_body<T: Write>(&self, writer: &mut T) -> io::Result<()> {
+        let data = self.links_to_chains();
+        if data.len() != self.chains {
+            let msg = format!("Expected {} chains, but found {}", self.chains, data.len());
+            return Err(Error::new(ErrorKind::InvalidData, msg));
+        }
+        for chain in data.iter() {
+            chain.serialize(writer)?;
+        }
+        Ok(())
     }
 
     fn load<T: Read>(reader: &mut T) -> io::Result<Self> {
@@ -2013,10 +2061,12 @@ impl Serialize for Chains {
     }
 
     fn size_in_elements(&self) -> usize {
-        // FIXME
-        // let data = Self::links_to_chains()
-        // 1 + sum over chain sizes
-        unimplemented!()
+        let mut result = 1;
+        let data = self.links_to_chains();
+        for chain in data.iter() {
+            result += chain.size_in_elements();
+        }
+        result
     }
 }
 

@@ -825,6 +825,7 @@ fn chains_empty() {
     let chains = Chains::new();
     assert_eq!(chains.len(), 0, "Expected empty chains");
     assert_eq!(chains.links(), 0, "Expected no links");
+    let _ = serialize::test(&chains, "empty-chains", None, true);
 }
 
 #[test]
@@ -843,6 +844,8 @@ fn chains_nonempty() {
     for (from, to) in chains.iter() {
         check_region(&graph, &chains, from, to);
     }
+
+    let _ = serialize::test(&chains, "nonempty-chains", None, true);
 }
 
 //-----------------------------------------------------------------------------
