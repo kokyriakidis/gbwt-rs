@@ -2091,7 +2091,7 @@ impl Chains {
 
     /// Returns an iterator over the links, ordered by source handle.
     ///
-    /// Filter using [`support::encoded_edge_is_canonical`] to visit each link in a single orientation.
+    /// Filter using [`encoded_edge_is_canonical`] to visit each link in a single orientation.
     pub fn iter(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
         self.next.iter().map(|(k, v)| (*k, *v))
     }

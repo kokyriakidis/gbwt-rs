@@ -43,8 +43,9 @@ mod tests;
 ///
 /// A GBZ graph combines a [`GBWT`] index and a [`Sequences`] structure.
 /// It represents the subgraph of the original graph induced by the paths in the GBWT index.
-/// `GBZ` methods used node identifiers in the original graph.
+/// `GBZ` methods used node identifiers in the original graph, while a GBWT node identifier (or a handle) encodes an oriented visit to a node.
 /// Functions [`support::encode_node`], [`support::node_id`], [`support::node_orientation`], [`support::decode_node`], and [`support::flip_node`] enable conversions between original and GBWT node ids.
+///
 /// While the methods in [`Sequences`] may panic or return unpredictable results when the corresponding object does not exist, `GBZ` methods return [`None`] in such cases.
 ///
 /// In addition to representing a bidirected sequence graph with integer node ids, a `GBZ` also contains an optional node-to-segment translation.
