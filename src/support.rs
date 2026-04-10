@@ -1873,3 +1873,151 @@ impl ExactSizeIterator for EdgeListIter<'_> {}
 impl FusedIterator for EdgeListIter<'_> {}
 
 //-----------------------------------------------------------------------------
+
+// FIXME: construction
+/// A set of top-level chains represented as links between boundary nodes.
+///
+/// Top-level chains provide a linear high-level structure for each weakly connected component in the graph.
+/// A chain is a sequence of nodes and snarls.
+/// Boundary nodes bordering the snarls form a sketch of graph topology.
+/// Given a pair of boundary nodes, the graph region between them is either a unary path or a snarl.
+/// In both cases, no path can leave the region without visiting one of the boundary nodes.
+///
+/// This representation is based on storing links between successive boundary nodes.
+/// Each link is stored twice, once in each orientation.
+///
+/// # Examples
+///
+/// ```
+/// use gbz::support::{self, Chains, Orientation};
+/// use simple_sds::serialize;
+///
+/// let filename = support::get_test_data("micb-kir3dl1.chains");
+/// let chains = serialize::load_from(&filename);
+/// assert!(chains.is_ok());
+/// let chains: Chains = chains.unwrap();
+///
+/// assert_eq!(chains.len(), 2);
+/// assert_eq!(chains.links(), 925);
+/// let handle = support::encode_node(44, Orientation::Forward);
+/// assert!(chains.has_handle(handle));
+/// let next = support::encode_node(47, Orientation::Forward);
+/// assert_eq!(chains.next(handle), Some(next));
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Chains {
+    chains: usize,
+    next: BTreeMap<usize, usize>,
+}
+
+impl Chains {
+    // Reads the serialized chains representation.
+    fn read_data<R: Read>(reader: &mut R) -> io::Result<Vec<IntVector>> {
+        let chains = usize::load(reader)?;
+        let mut data: Vec<IntVector> = Vec::with_capacity(chains);
+        for _ in 0..chains {
+            let vec = IntVector::load(reader)?;
+            data.push(vec);
+        }
+        Ok(data)
+    }
+
+    // Converts the chains to a bidirectional link map.
+    fn link_map(data: Vec<IntVector>) -> io::Result<BTreeMap<usize, usize>> {
+        let mut next = BTreeMap::new();
+        for chain in data {
+            for i in 1..chain.len() {
+                let from = chain.get(i - 1) as usize;
+                if next.contains_key(&from) {
+                    let msg = format!("Duplicate link from {}", from);
+                    return Err(Error::new(ErrorKind::InvalidData, msg));
+                }
+                let to = chain.get(i) as usize;
+                next.insert(from, to);
+
+                let rev_from = flip_node(to);
+                if next.contains_key(&rev_from) {
+                    let msg = format!("Duplicate link from {}", rev_from);
+                    return Err(Error::new(ErrorKind::InvalidData, msg));
+                }
+                let rev_to = flip_node(from);
+                next.insert(rev_from, rev_to);
+            }
+        }
+        Ok(next)
+    }
+
+    /// Creates an empty set of chains.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the number of chains.
+    pub fn len(&self) -> usize {
+        self.chains
+    }
+
+    /// Returns `true` if there are no chains.
+    pub fn is_empty(&self) -> bool {
+        self.chains == 0
+    }
+
+    /// Returns the total number of links in the chains.
+    pub fn links(&self) -> usize {
+        self.next.len() / 2
+    }
+
+    /// Returns the successor for the given handle in the chains, or [`None`] if there is no successor.
+    pub fn next(&self, handle: usize) -> Option<usize> {
+        self.next.get(&handle).copied()
+    }
+
+    /// Returns `true` if the given node is a boundary node in one of the chains.
+    pub fn has_node(&self, node_id: usize) -> bool {
+        let fw_handle = encode_node(node_id, Orientation::Forward);
+        let rev_handle = encode_node(node_id, Orientation::Reverse);
+        self.next.contains_key(&fw_handle) || self.next.contains_key(&rev_handle)
+    }
+
+    /// Returns `true` if the given handle refers to a boundary node.
+    pub fn has_handle(&self, handle: usize) -> bool {
+        let rev_handle = flip_node(handle);
+        self.next.contains_key(&handle) || self.next.contains_key(&rev_handle)
+    }
+
+    /// Returns an iterator over the links, ordered by source handle.
+    ///
+    /// Filter using [`support::encoded_edge_is_canonical`] to visit each link in a single orientation.
+    pub fn iter(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.next.iter().map(|(k, v)| (*k, *v))
+    }
+}
+
+impl Serialize for Chains {
+    fn serialize_header<T: Write>(&self, writer: &mut T) -> io::Result<()> {
+        self.chains.serialize(writer)
+    }
+
+    fn serialize_body<T: Write>(&self, _: &mut T) -> io::Result<()> {
+        // FIXME
+        // let data = Self::links_to_chains()
+        // serialize each chain in data
+        unimplemented!()
+    }
+
+    fn load<T: Read>(reader: &mut T) -> io::Result<Self> {
+        let data = Self::read_data(reader)?;
+        let chains = data.len();
+        let next = Self::link_map(data)?;
+        Ok(Self { chains, next })
+    }
+
+    fn size_in_elements(&self) -> usize {
+        // FIXME
+        // let data = Self::links_to_chains()
+        // 1 + sum over chain sizes
+        unimplemented!()
+    }
+}
+
+//-----------------------------------------------------------------------------
