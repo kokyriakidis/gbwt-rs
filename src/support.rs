@@ -1874,7 +1874,6 @@ impl FusedIterator for EdgeListIter<'_> {}
 
 //-----------------------------------------------------------------------------
 
-// FIXME: construction
 /// A set of top-level chains represented as links between boundary nodes.
 ///
 /// Top-level chains provide a linear high-level structure for each weakly connected component in the graph.
@@ -1885,6 +1884,17 @@ impl FusedIterator for EdgeListIter<'_> {}
 ///
 /// This representation is based on storing links between successive boundary nodes.
 /// Each link is stored twice, once in each orientation.
+///
+/// # Serialization
+///
+/// `Chains` implements Simple-SDS serialization, but the format may still change.
+/// It is currently intended for extracting top-level chains from a vg distance index or snarl decomposition and using them in GBZ-base.
+///
+/// The header contains the number of chains as an [`usize`] element.
+/// Each chain is stored as an [`IntVector`] storing the sequence of oriented boundary nodes as GBWT node identifiers / handles.
+/// Each chain is expected to be in the canonical orientation and to have the minimal necessary bit width for the items.
+/// That generally means that most nodes are in the forward orientation and the sequence of node identifiers is mostly increasing.
+/// The chains are expected to be sorted in lexicographic order.
 ///
 /// # Examples
 ///
@@ -1947,15 +1957,20 @@ impl Chains {
         Ok(next)
     }
 
-    // Converts the link map back to chains.
-    fn links_to_chains(&self) -> Vec<IntVector> {
-        // Collect the head/tail nodes in the orientation pointing inward.
-        let mut active: BTreeSet<usize> = BTreeSet::new();
+    // Returns the set of head/tail nodes in the orientation pointing inward.
+    fn head_tail_nodes(&self) -> BTreeSet<usize> {
+        let mut result = BTreeSet::new();
         for &handle in self.next.keys() {
-            if self.next(flip_node(handle)).is_none() {
-                active.insert(handle);
+            if self.next.get(&flip_node(handle)).is_none() {
+                result.insert(handle);
             }
         }
+        result
+    }
+
+    // Converts the link map back to chains.
+    fn links_to_chains(&self) -> Vec<IntVector> {
+        let mut active = self.head_tail_nodes();
 
         // Iterate over all chains, starting from the smallest remaining head/tail.
         let mut result = Vec::new();
@@ -1993,6 +2008,52 @@ impl Chains {
     /// Creates an empty set of chains.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Adds a new bidirectional link between the two handles.
+    ///
+    /// That means a link from `from` to `to` and from `flip_node(to)` to `flip_node(from)`.
+    /// Returns `true` if the links were added and `false` if there was already a link from `from` or `flip_node(to)`.
+    ///
+    /// New links may change the number of chains.
+    /// After all links have been added, the number of chains should be determined using [`Self::count_chains`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gbz::support::Chains;
+    ///
+    /// let mut chains = Chains::new();
+    /// let _ = chains.add_link(2, 4);
+    /// let _ = chains.add_link(4, 6);
+    /// let _ = chains.add_link(12, 14);
+    /// let _ = chains.add_link(14, 17);
+    ///
+    /// // This will fail, because link (2, 4) is also link (5, 3).
+    /// let result = chains.add_link(5, 3);
+    /// assert!(!result);
+    ///
+    /// chains.count_chains();
+    /// assert_eq!(chains.len(), 2);
+    /// assert_eq!(chains.links(), 4);
+    /// // This is the other orientation of (14, 17).
+    /// assert_eq!(chains.next(16), Some(15));
+    /// ```
+    pub fn add_link(&mut self, from: usize, to: usize) -> bool {
+        if self.next.contains_key(&from) || self.next.contains_key(&flip_node(to)) {
+            return false;
+        }
+        self.next.insert(from, to);
+        self.next.insert(flip_node(to), flip_node(from));
+        true
+    }
+
+    /// Determines the number of chains implied by the links.
+    ///
+    /// This should be called after using [`Self::add_link`].
+    pub fn count_chains(&mut self) {
+        let heads_tails = self.head_tail_nodes();
+        self.chains = heads_tails.len() / 2;
     }
 
     /// Returns the number of chains.

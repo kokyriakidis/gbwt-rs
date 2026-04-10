@@ -848,4 +848,46 @@ fn chains_nonempty() {
     let _ = serialize::test(&chains, "nonempty-chains", None, true);
 }
 
+#[test]
+fn chains_add_link() {
+    let chains_file = get_test_data("micb-kir3dl1.chains");
+    let data = load_chains(&chains_file);
+    let truth = serialize::load_from(&chains_file);
+    if let Err(msg) = truth {
+        panic!("Failed to read chains from {}: {}", chains_file.display(), msg);
+    }
+    let truth: Chains = truth.unwrap();
+
+    // Build the chains manually.
+    let mut chains = Chains::new();
+    for (i, chain) in data.iter().enumerate() {
+        for j in 1..chain.len() {
+            let from = chain.get(j - 1) as usize;
+            let to = chain.get(j) as usize;
+            let result = chains.add_link(from, to);
+            assert!(result, "Failed to add link from {} to {} (chain {}, index {})", from, to, i, j);
+        }
+    }
+    chains.count_chains();
+    assert_eq!(chains.len(), truth.len(), "Mismatch in number of chains");
+    assert_eq!(chains.links(), truth.links(), "Mismatch in number of links");
+    assert_eq!(chains, truth, "Mismatch in chains content");
+
+    // Try adding duplicate links in either orientation.
+    const NO_NODE: usize = 1_000_000;
+    for (i, chain) in data.iter().enumerate() {
+        for (j, handle) in chain.iter().enumerate() {
+            let node = handle as usize;
+            if j + 1 < chain.len() {
+                let result = chains.add_link(node, NO_NODE);
+                assert!(!result, "Added a duplicate link from {} (chain {}, index {})", node, i, j);
+            }
+            if j > 0 {
+                let result = chains.add_link(flip_node(node), NO_NODE);
+                assert!(!result, "Added a duplicate link from {} (chain {}, index {})", flip_node(node), i, j);
+            }
+        }
+    }
+}
+
 //-----------------------------------------------------------------------------
