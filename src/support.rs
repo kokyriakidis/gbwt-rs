@@ -1917,6 +1917,7 @@ impl FusedIterator for EdgeListIter<'_> {}
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Chains {
     chains: usize,
+    components: Option<usize>,
     next: BTreeMap<usize, usize>,
 }
 
@@ -2056,9 +2057,22 @@ impl Chains {
         self.chains = heads_tails.len() / 2;
     }
 
+    /// Sets the number of weakly connected components in the graph.
+    pub fn set_components(&mut self, components: Option<usize>) {
+        self.components = components;
+    }
+
     /// Returns the number of chains.
     pub fn len(&self) -> usize {
         self.chains
+    }
+
+    /// Returns the number of weakly connected components in the graph, if known.
+    ///
+    /// In the ideal case, this should be the same as the number of chains.
+    /// But in more complex graphs, there can be multiple chains in a component, and some components may not have any chains.
+    pub fn components(&self) -> Option<usize> {
+        self.components
     }
 
     /// Returns `true` if there are no chains.
@@ -2118,7 +2132,7 @@ impl Serialize for Chains {
         let data = Self::read_data(reader)?;
         let chains = data.len();
         let next = Self::link_map(data)?;
-        Ok(Self { chains, next })
+        Ok(Self { chains, components: None, next })
     }
 
     fn size_in_elements(&self) -> usize {

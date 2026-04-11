@@ -372,6 +372,7 @@ pub fn path_lcs(a: &[usize], b: &[usize], graph: &GBZ) -> (Vec<(usize, usize)>, 
 ///
 /// let chains = algorithms::find_chains(&gbz);
 /// assert_eq!(chains.len(), 1);
+/// assert_eq!(chains.components(), Some(1));
 /// assert_eq!(chains.links(), 3);
 /// assert_eq!(
 ///     chains.next(support::encode_node(2, Orientation::Forward)),
@@ -429,6 +430,7 @@ pub fn find_chains(graph: &GBZ) -> Chains {
     }
 
     chains.count_chains();
+    chains.set_components(Some(components.len()));
     chains
 }
 

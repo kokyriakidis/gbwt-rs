@@ -281,10 +281,12 @@ fn similar_sequences_lcs() {
 #[test]
 fn find_chains_test() {
     let graph: GBZ = serialize::load_from(&support::get_test_data("micb-kir3dl1.gbz")).unwrap();
-    let expected: Chains = serialize::load_from(&support::get_test_data("micb-kir3dl1.chains")).unwrap();
+    let mut expected: Chains = serialize::load_from(&support::get_test_data("micb-kir3dl1.chains")).unwrap();
     let result = find_chains(&graph);
 
     assert_eq!(result.len(), expected.len(), "Number of chains differs");
+    assert_eq!(result.components(), Some(result.len()), "Expected the number of components to match the number of chains");
+    expected.set_components(result.components()); // Serialized chains do not include the number of components.
     assert_eq!(result.links(), expected.links(), "Number of links differs");
     assert!(result.iter().eq(expected.iter()), "Link iterators differ");
     assert_eq!(result, expected, "Internal chain structures differ");
