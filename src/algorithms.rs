@@ -349,6 +349,7 @@ pub fn path_lcs(a: &[usize], b: &[usize], graph: &GBZ) -> (Vec<(usize, usize)>, 
 // We could also compute the minimum distance (in bp) from the start of the chain to each node.
 // That would be good enough to replace the distance index in haplotype sampling.
 // TODO: Chain as a vector of (handle, is_snarl_start, is_snarl_end, distance_from_start, distance_to_end) tuples?
+// TODO: Process the components in parallel?
 
 /// Finds top-level chains in the graph.
 ///
@@ -359,6 +360,9 @@ pub fn path_lcs(a: &[usize], b: &[usize], graph: &GBZ) -> (Vec<(usize, usize)>, 
 /// All articulation points in underlying undirected graph of the component must be between the tips.
 /// If these assumptions do not hold, the component is skipped and not included in the result.
 /// In more complex cases, the chains can be extracted from a snarl decomposition or a distance index using `vg chains`.
+///
+/// The algorithm uses 32-bit integers internally to save memory.
+/// This is not a serious limitation, as GBWTs in the vg ecosystem also use 32-bit node identifiers in many places.
 ///
 /// # Examples
 ///
@@ -401,7 +405,7 @@ pub fn find_chains(graph: &GBZ) -> Chains {
         // Then add the tips to get the set of chain nodes.
         let mut chain_node_ids = find_articulation_points(graph, component);
         for tip in tips.iter() {
-            chain_node_ids.insert(support::node_id(*tip));
+            chain_node_ids.insert(support::node_id(*tip as usize) as u32);
         }
 
         // This will return empty vectors if some chain nodes were not visited.
@@ -420,12 +424,12 @@ pub fn find_chains(graph: &GBZ) -> Chains {
         }
 
         // Add links between consecutive boundary nodes.
-        let boundary: Vec<usize> = (0..chain_handles.len())
+        let boundary: Vec<u32> = (0..chain_handles.len())
             .filter(|&i| is_boundary[i])
             .map(|i| chain_handles[i])
             .collect();
         for pair in boundary.windows(2) {
-            chains.add_link(pair[0], pair[1]);
+            chains.add_link(pair[0] as usize, pair[1] as usize);
         }
     }
 
@@ -436,7 +440,7 @@ pub fn find_chains(graph: &GBZ) -> Chains {
 
 // Returns inward-oriented handles for tip nodes in the component.
 // A tip node has successors on one side but not the other.
-fn find_tips(graph: &GBZ, component: &[usize]) -> Vec<usize> {
+fn find_tips(graph: &GBZ, component: &[usize]) -> Vec<u32> {
     let mut tips = Vec::new();
     for &node_id in component {
         let fwd_succ = graph.successors(node_id, Orientation::Forward)
@@ -452,9 +456,9 @@ fn find_tips(graph: &GBZ, component: &[usize]) -> Vec<usize> {
         }
         // Tip: has edges on one side only. Inward handle is the orientation with successors.
         if fwd_succ > 0 {
-            tips.push(support::encode_node(node_id, Orientation::Forward));
+            tips.push(support::encode_node(node_id, Orientation::Forward) as u32);
         } else {
-            tips.push(support::encode_node(node_id, Orientation::Reverse));
+            tips.push(support::encode_node(node_id, Orientation::Reverse) as u32);
         }
     }
     tips
@@ -462,78 +466,78 @@ fn find_tips(graph: &GBZ, component: &[usize]) -> Vec<usize> {
 
 // Finds articulation points in the underlying undirected graph of a component using Tarjan's algorithm.
 // Returns node ids (not handles).
-fn find_articulation_points(graph: &GBZ, component: &[usize]) -> HashSet<usize> {
-    let component_set: HashSet<usize> = component.iter().copied().collect();
-    let mut index_map: HashMap<usize, usize> = HashMap::new(); // Node id to index in component vector.
+fn find_articulation_points(graph: &GBZ, component: &[usize]) -> HashSet<u32> {
+    // Map from node ids to indices in the component vector.
+    let mut index_map: HashMap<u32, u32> = HashMap::new();
     for (i, &node_id) in component.iter().enumerate() {
-        index_map.insert(node_id, i);
+        index_map.insert(node_id as u32, i as u32);
     }
 
     let n = component.len();
-    let mut discovered = vec![0usize; n]; // Discovery time (rank) of each node in DFS.
-    let mut low = vec![0usize; n]; // Lowest discovery time reachable from the node via DFS tree edges and back edges.
+    let mut discovered = vec![0u32; n]; // Discovery time (rank) of each node in DFS.
+    let mut low = vec![0u32; n]; // Lowest discovery time reachable from the node via DFS tree edges and back edges.
     let mut visited = vec![false; n];
-    let mut parent = vec![usize::MAX; n];
+    let mut parent = vec![u32::MAX; n];
     let mut result = HashSet::new();
-    let mut timer = 0usize;
+    let mut timer = 0u32;
 
-    // Get undirected neighbors of a node (all nodes reachable via successors or predecessors in either orientation).
-    let get_neighbors = |node_id: usize| -> Vec<usize> {
+    // Get the `i`-th neighbor of the node with id `node_id` in the component, if it exists.
+    // We assume that node degrees are low and it is more efficient to iterate over neighbors than to store them in a vector.
+    let get_neighbor = |node_id: u32, i: u32| -> Option<u32> {
         let mut nbrs = HashSet::new();
         for orientation in [Orientation::Forward, Orientation::Reverse] {
-            if let Some(iter) = graph.successors(node_id, orientation) {
+            if let Some(iter) = graph.successors(node_id as usize, orientation) {
                 for (next_id, _) in iter {
-                    if component_set.contains(&next_id) {
-                        nbrs.insert(next_id);
+                    if index_map.contains_key(&(next_id as u32)) {
+                        nbrs.insert(next_id as u32);
+                        if nbrs.len() > i as usize {
+                            return Some(next_id as u32);
+                        }
                     }
                 }
             }
         }
-        nbrs.into_iter().collect()
+        None
     };
 
     // Iterative Tarjan's algorithm for articulation points.
-    // Stack entries: (node index, neighbor list, next neighbor).
-    let start_index = 0;
-    let mut stack: Vec<(usize, Vec<usize>, usize)> = Vec::new();
-    visited[start_index] = true;
-    discovered[start_index] = timer;
-    low[start_index] = timer;
+    // Stack entries: (node index, next neighbor).
+    let mut stack: Vec<(u32, u32)> = Vec::new();
+    visited[0] = true;
+    discovered[0] = timer;
+    low[0] = timer;
     timer += 1;
-    let nbrs = get_neighbors(component[start_index]);
-    stack.push((start_index, nbrs, 0));
+    stack.push((0, 0));
 
-    while let Some((from_index, neighbors, next_neighbor)) = stack.last_mut() {
-        if *next_neighbor < neighbors.len() {
-            let to_id = neighbors[*next_neighbor];
+    while let Some((from_index, next_neighbor)) = stack.last_mut() {
+        if let Some(to_id) = get_neighbor(component[*from_index as usize] as u32, *next_neighbor) {
             *next_neighbor += 1;
             let to_index = index_map[&to_id];
-            if !visited[to_index] {
-                visited[to_index] = true;
-                discovered[to_index] = timer;
-                low[to_index] = timer;
+            if !visited[to_index as usize] {
+                visited[to_index as usize] = true;
+                discovered[to_index as usize] = timer;
+                low[to_index as usize] = timer;
                 timer += 1;
-                parent[to_index] = *from_index;
-                let to_nbrs = get_neighbors(component[to_index]);
-                stack.push((to_index, to_nbrs, 0));
-            } else if to_index != parent[*from_index] {
-                low[*from_index] = cmp::min(low[*from_index], discovered[to_index]);
+                parent[to_index as usize] = *from_index;
+                stack.push((to_index, 0));
+            } else if to_index != parent[*from_index as usize] {
+                low[*from_index as usize] = cmp::min(low[*from_index as usize], discovered[to_index as usize]);
             }
         } else {
             // Done processing node from, pop and update parent.
             let from_index = *from_index;
             stack.pop();
-            if let Some((parent_index, _, _)) = stack.last() {
-                low[*parent_index] = cmp::min(low[*parent_index], low[from_index]);
+            if let Some((parent_index, _)) = stack.last() {
+                low[*parent_index as usize] = cmp::min(low[*parent_index as usize], low[from_index as usize]);
                 // Check if parent_index is an articulation point via child from_index.
-                if parent[*parent_index] == usize::MAX {
+                if parent[*parent_index as usize] == u32::MAX {
                     // parent_index is the root; it's an articulation point (or a tip) if it has 2+ children in DFS tree.
                     let child_count = parent.iter().filter(|&&p| p == *parent_index).count();
                     if child_count > 1 {
-                        result.insert(component[*parent_index]);
+                        result.insert(component[*parent_index as usize] as u32);
                     }
-                } else if low[from_index] >= discovered[*parent_index] {
-                    result.insert(component[*parent_index]);
+                } else if low[from_index as usize] >= discovered[*parent_index as usize] {
+                    result.insert(component[*parent_index as usize] as u32);
                 }
             }
         }
@@ -547,9 +551,9 @@ fn find_articulation_points(graph: &GBZ, component: &[usize]) -> HashSet<usize> 
 // is_snarl[i] indicates whether the link between chain_handles[i] and chain_handles[i+1] is a snarl.
 fn walk_chain(
     graph: &GBZ,
-    start_handle: usize,
-    chain_node_ids: &HashSet<usize>
-) -> (Vec<usize>, Vec<bool>) {
+    start_handle: u32,
+    chain_node_ids: &HashSet<u32>
+) -> (Vec<u32>, Vec<bool>) {
     let mut chain_handles = Vec::with_capacity(chain_node_ids.len());
     let mut is_snarl = Vec::with_capacity(chain_node_ids.len());
 
@@ -557,8 +561,8 @@ fn walk_chain(
     chain_handles.push(current);
 
     loop {
-        let cur_id = support::node_id(current);
-        let cur_orient = support::node_orientation(current);
+        let cur_id = support::node_id(current as usize);
+        let cur_orient = support::node_orientation(current as usize);
 
         let succs: Vec<(usize, Orientation)> = graph.successors(cur_id, cur_orient)
             .map_or(Vec::new(), |iter| iter.collect());
@@ -569,7 +573,7 @@ fn walk_chain(
         // Check if this is a simple bridge edge: single successor with single predecessor.
         if succs.len() == 1 {
             let (next_id, next_o) = succs[0];
-            let next_handle = support::encode_node(next_id, next_o);
+            let next_handle = support::encode_node(next_id, next_o) as u32;
             let pred_count = graph.predecessors(next_id, next_o)
                 .map_or(0, |iter: crate::gbz::EdgeIter<'_>| iter.len());
             if pred_count == 1 {
@@ -600,20 +604,20 @@ fn walk_chain(
 // BFS from the current handle's successors to find the next chain/tip node.
 fn find_snarl_end(
     graph: &GBZ,
-    current_handle: usize,
-    chain_node_ids: &HashSet<usize>
-) -> usize {
-    let cur_id = support::node_id(current_handle);
-    let cur_orient = support::node_orientation(current_handle);
+    current_handle: u32,
+    chain_node_ids: &HashSet<u32>
+) -> u32 {
+    let cur_id = support::node_id(current_handle as usize);
+    let cur_orient = support::node_orientation(current_handle as usize);
 
-    let mut queue: VecDeque<usize> = VecDeque::new();
-    let mut visited: HashSet<usize> = HashSet::new();
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    let mut visited: HashSet<u32> = HashSet::new();
     visited.insert(current_handle);
 
     // Seed BFS with successors of the current handle.
     if let Some(iter) = graph.successors(cur_id, cur_orient) {
         for (next_id, next_o) in iter {
-            let next_handle = support::encode_node(next_id, next_o);
+            let next_handle = support::encode_node(next_id, next_o) as u32;
             if !visited.contains(&next_handle) {
                 visited.insert(next_handle);
                 queue.push_back(next_handle);
@@ -622,17 +626,17 @@ fn find_snarl_end(
     }
 
     while let Some(handle) = queue.pop_front() {
-        let h_id = support::node_id(handle);
-        let h_orient = support::node_orientation(handle);
+        let h_id = support::node_id(handle as usize);
+        let h_orient = support::node_orientation(handle as usize);
 
         // If this is a chain node (bridge or tip) different from current, it's our target.
-        if chain_node_ids.contains(&h_id) && h_id != cur_id {
+        if chain_node_ids.contains(&(h_id as u32)) && h_id != cur_id {
             return handle;
         }
 
         if let Some(iter) = graph.successors(h_id, h_orient) {
             for (next_id, next_o) in iter {
-                let next_handle = support::encode_node(next_id, next_o);
+                let next_handle = support::encode_node(next_id, next_o) as u32;
                 if !visited.contains(&next_handle) {
                     visited.insert(next_handle);
                     queue.push_back(next_handle);
