@@ -344,6 +344,12 @@ pub fn path_lcs(a: &[usize], b: &[usize], graph: &GBZ) -> (Vec<(usize, usize)>, 
 
 //-----------------------------------------------------------------------------
 
+// TODO: chains.rs with the `Chains` struct and related code.
+// TODO: We could have a version that returns the actual chains (including the non-boundary nodes?).
+// We could also compute the minimum distance (in bp) from the start of the chain to each node.
+// That would be good enough to replace the distance index in haplotype sampling.
+// TODO: Chain as a vector of (handle, is_snarl_start, is_snarl_end, distance_from_start, distance_to_end) tuples?
+
 /// Finds top-level chains in the graph.
 ///
 /// A top-level chain is a sequence of boundary nodes bordering snarls in a weakly connected component.
