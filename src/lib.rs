@@ -61,7 +61,7 @@ pub use crate::gbwt::builder::{GBWTBuilder, MutableGBWT};
 pub use crate::gbz::GBZ;
 pub use crate::sequences::Segment;
 pub use crate::metadata::{Metadata, MetadataBuilder, PathName, FullPathName};
-pub use crate::support::{GraphPosition, Orientation};
+pub use crate::support::{GraphPosition, Orientation, NodeSide};
 
 //-----------------------------------------------------------------------------
 
