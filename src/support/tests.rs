@@ -1,12 +1,15 @@
 use super::*;
 
+use crate::GBZ;
+
 use simple_sds::{bits, serialize};
 
 use rand::Rng;
 use rand::seq::SliceRandom;
 use rand::rngs::ThreadRng;
 
-use std::fs::{self, OpenOptions};
+use std::collections::HashSet;
+use std::fs::{self, File, OpenOptions};
 
 //-----------------------------------------------------------------------------
 
@@ -752,6 +755,139 @@ fn edge_list_ranks() {
     edges.set_ranks();
     truth.sort();
     check_edge_list(&edges, &truth);
+}
+
+//-----------------------------------------------------------------------------
+
+fn load_chains(filename: &PathBuf) -> Vec<IntVector> {
+    let file = File::open(&filename);
+    assert!(file.is_ok(), "Failed to open chains file {}", filename.display());
+    let mut file = file.unwrap();
+    let data = Chains::read_data(&mut file);
+    assert!(data.is_ok(), "Failed to read chains from {}", filename.display());
+    data.unwrap()
+}
+
+fn check_chains(chains: &Chains, data: &[IntVector]) {
+    assert_eq!(chains.len(), data.len(), "Wrong number of chains");
+    let mut expected_links = 0;
+    for chain in data.iter() {
+        if chain.len() > 1 {
+            expected_links += chain.len() - 1;
+        }
+    }
+    assert_eq!(chains.links(), expected_links, "Wrong number of links");
+
+    // Handles and nodes should be present.
+    for chain in data.iter() {
+        for handle in chain.iter().map(|x| x as usize) {
+            assert!(chains.has_handle(handle), "Missing handle {}", handle);
+            let rev_handle = flip_node(handle);
+            assert!(chains.has_handle(rev_handle), "Missing reverse handle {}", rev_handle);
+            let (node_id, _) = decode_node(handle);
+            assert!(chains.has_node(node_id), "Missing node {}", node_id);
+        }
+    }
+
+    // Missing handles and nodes should not be present.
+    let max_handle = data.iter().flat_map(|x| x.iter().map(|y| y as usize)).max().unwrap();
+    assert!(!chains.has_handle(max_handle + 2), "Unexpected handle {}", max_handle + 1);
+    let missing_node = decode_node(max_handle).0 + 1;
+    assert!(!chains.has_node(missing_node), "Unexpected node {}", missing_node);
+}
+
+fn check_region(graph: &GBZ, chains: &Chains, from: usize, to: usize) {
+    // Active handles. We proceed to their successors but not predecessors.
+    let mut active = vec![from, flip_node(to)];
+    // Visited node identifiers.
+    let mut visited = HashSet::new();
+    visited.insert(decode_node(from).0);
+    visited.insert(decode_node(to).0);
+
+    while !active.is_empty() {
+        let curr = active.pop().unwrap();
+        let (node_id, orientation) = decode_node(curr);
+        for (next_id, next_o) in graph.successors(node_id, orientation).unwrap() {
+            if visited.contains(&next_id) {
+                continue;
+            }
+            let fw_handle = encode_node(next_id, next_o);
+            let rev_handle = flip_node(fw_handle);
+            assert!(!chains.has_node(next_id), "Reached boundary node {} ({}, {}) from region {}..{}", fw_handle, next_id, next_o, from, to);
+            active.push(fw_handle); active.push(rev_handle);
+            visited.insert(next_id);
+        }
+    }
+}
+
+#[test]
+fn chains_empty() {
+    let chains = Chains::new();
+    assert_eq!(chains.len(), 0, "Expected empty chains");
+    assert_eq!(chains.links(), 0, "Expected no links");
+    let _ = serialize::test(&chains, "empty-chains", None, true);
+}
+
+#[test]
+fn chains_nonempty() {
+    let chains_file = get_test_data("micb-kir3dl1.chains");
+    let data = load_chains(&chains_file);
+    let chains = serialize::load_from(&chains_file);
+    if let Err(msg) = chains {
+        panic!("Failed to read chains from {}: {}", chains_file.display(), msg);
+    }
+    let chains: Chains = chains.unwrap();
+    check_chains(&chains, &data);
+
+    let graph_file = get_test_data("micb-kir3dl1.gbz");
+    let graph: GBZ = serialize::load_from(&graph_file).unwrap();
+    for (from, to) in chains.iter() {
+        check_region(&graph, &chains, from, to);
+    }
+
+    let _ = serialize::test(&chains, "nonempty-chains", None, true);
+}
+
+#[test]
+fn chains_add_link() {
+    let chains_file = get_test_data("micb-kir3dl1.chains");
+    let data = load_chains(&chains_file);
+    let truth = serialize::load_from(&chains_file);
+    if let Err(msg) = truth {
+        panic!("Failed to read chains from {}: {}", chains_file.display(), msg);
+    }
+    let truth: Chains = truth.unwrap();
+
+    // Build the chains manually.
+    let mut chains = Chains::new();
+    for (i, chain) in data.iter().enumerate() {
+        for j in 1..chain.len() {
+            let from = chain.get(j - 1) as usize;
+            let to = chain.get(j) as usize;
+            let result = chains.add_link(from, to);
+            assert!(result, "Failed to add link from {} to {} (chain {}, index {})", from, to, i, j);
+        }
+    }
+    chains.count_chains();
+    assert_eq!(chains.len(), truth.len(), "Mismatch in number of chains");
+    assert_eq!(chains.links(), truth.links(), "Mismatch in number of links");
+    assert_eq!(chains, truth, "Mismatch in chains content");
+
+    // Try adding duplicate links in either orientation.
+    const NO_NODE: usize = 1_000_000;
+    for (i, chain) in data.iter().enumerate() {
+        for (j, handle) in chain.iter().enumerate() {
+            let node = handle as usize;
+            if j + 1 < chain.len() {
+                let result = chains.add_link(node, NO_NODE);
+                assert!(!result, "Added a duplicate link from {} (chain {}, index {})", node, i, j);
+            }
+            if j > 0 {
+                let result = chains.add_link(flip_node(node), NO_NODE);
+                assert!(!result, "Added a duplicate link from {} (chain {}, index {})", flip_node(node), i, j);
+            }
+        }
+    }
 }
 
 //-----------------------------------------------------------------------------

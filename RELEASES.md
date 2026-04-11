@@ -3,6 +3,9 @@
 ## Current version
 
 * Command line arguments can use suffixes (e.g. `k`, `MiB`) for sizes and counts that can plausibly be large.
+* Top-level chains:
+  * `Chains` storing a sketch of the high-level structure of the graph (imported from GBZ-base).
+  * Algorithm for finding the chains in a graph.
 
 ## GBZ 0.6.0 (2026-03-30)
 

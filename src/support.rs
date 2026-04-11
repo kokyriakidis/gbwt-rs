@@ -13,7 +13,7 @@ use zstd::stream::Encoder as ZstdEncoder;
 use zstd::stream::Decoder as ZstdDecoder;
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, BTreeSet};
 use std::collections::btree_map::Iter as TagIter;
 use std::collections::hash_map::Entry;
 use std::convert::TryFrom;
@@ -1871,5 +1871,264 @@ impl<'a> Iterator for EdgeListIter<'a> {
 impl ExactSizeIterator for EdgeListIter<'_> {}
 
 impl FusedIterator for EdgeListIter<'_> {}
+
+//-----------------------------------------------------------------------------
+
+/// A set of top-level chains represented as links between boundary nodes.
+///
+/// Top-level chains provide a linear high-level structure for each weakly connected component in the graph.
+/// A chain is a sequence of nodes and snarls.
+/// Boundary nodes bordering the snarls form a sketch of graph topology.
+/// Given a pair of boundary nodes, the graph region between them is either a unary path or a snarl.
+/// In both cases, no path can leave the region without visiting one of the boundary nodes.
+///
+/// This representation is based on storing links between successive boundary nodes.
+/// Each link is stored twice, once in each orientation.
+///
+/// # Serialization
+///
+/// `Chains` implements Simple-SDS serialization, but the format may still change.
+/// It is currently intended for extracting top-level chains from a vg distance index or snarl decomposition and using them in GBZ-base.
+///
+/// The header contains the number of chains as an [`usize`] element.
+/// Each chain is stored as an [`IntVector`] storing the sequence of oriented boundary nodes as GBWT node identifiers / handles.
+/// Each chain is expected to be in the canonical orientation and to have the minimal necessary bit width for the items.
+/// That generally means that most nodes are in the forward orientation and the sequence of node identifiers is mostly increasing.
+/// The chains are expected to be sorted in lexicographic order.
+///
+/// # Examples
+///
+/// ```
+/// use gbz::support::{self, Chains, Orientation};
+/// use simple_sds::serialize;
+///
+/// let filename = support::get_test_data("micb-kir3dl1.chains");
+/// let chains = serialize::load_from(&filename);
+/// assert!(chains.is_ok());
+/// let chains: Chains = chains.unwrap();
+///
+/// assert_eq!(chains.len(), 2);
+/// assert_eq!(chains.links(), 925);
+/// let handle = support::encode_node(44, Orientation::Forward);
+/// assert!(chains.has_handle(handle));
+/// let next = support::encode_node(47, Orientation::Forward);
+/// assert_eq!(chains.next(handle), Some(next));
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Chains {
+    chains: usize,
+    next: BTreeMap<usize, usize>,
+}
+
+impl Chains {
+    // Reads the serialized chains representation.
+    fn read_data<R: Read>(reader: &mut R) -> io::Result<Vec<IntVector>> {
+        let chains = usize::load(reader)?;
+        let mut data: Vec<IntVector> = Vec::with_capacity(chains);
+        for _ in 0..chains {
+            let vec = IntVector::load(reader)?;
+            data.push(vec);
+        }
+        Ok(data)
+    }
+
+    // Converts the chains to a bidirectional link map.
+    fn link_map(data: Vec<IntVector>) -> io::Result<BTreeMap<usize, usize>> {
+        let mut next = BTreeMap::new();
+        for chain in data {
+            for i in 1..chain.len() {
+                let from = chain.get(i - 1) as usize;
+                if next.contains_key(&from) {
+                    let msg = format!("Duplicate link from {}", from);
+                    return Err(Error::new(ErrorKind::InvalidData, msg));
+                }
+                let to = chain.get(i) as usize;
+                next.insert(from, to);
+
+                let rev_from = flip_node(to);
+                if next.contains_key(&rev_from) {
+                    let msg = format!("Duplicate link from {}", rev_from);
+                    return Err(Error::new(ErrorKind::InvalidData, msg));
+                }
+                let rev_to = flip_node(from);
+                next.insert(rev_from, rev_to);
+            }
+        }
+        Ok(next)
+    }
+
+    // Returns the set of head/tail nodes in the orientation pointing inward.
+    fn head_tail_nodes(&self) -> BTreeSet<usize> {
+        let mut result = BTreeSet::new();
+        for &handle in self.next.keys() {
+            if !self.next.contains_key(&flip_node(handle)) {
+                result.insert(handle);
+            }
+        }
+        result
+    }
+
+    // Converts the link map back to chains.
+    fn links_to_chains(&self) -> Vec<IntVector> {
+        let mut active = self.head_tail_nodes();
+
+        // Iterate over all chains, starting from the smallest remaining head/tail.
+        let mut result = Vec::new();
+        while let Some(head) = active.first().copied() {
+            let mut path = vec![head];
+            let mut curr = head;
+            let mut max = head;
+            while let Some(next) = self.next(curr) {
+                path.push(next);
+                curr = next;
+                if next > max {
+                    max = next;
+                }
+            }
+            if let Some(head) = path.first() {
+                active.remove(head);
+            }
+            if let Some(tail) = path.last() {
+                active.remove(&flip_node(*tail));
+            }
+
+            // Encode the path in the canonical orientation.
+            if !encoded_path_is_canonical(&path) {
+                reverse_path_in_place(&mut path);
+            }
+            let width = simple_sds::bits::bit_len(max as u64);
+            let mut packed = IntVector::with_capacity(path.len(), width).unwrap();
+            packed.extend(path);
+            result.push(packed);
+        }
+
+        result
+    }
+
+    /// Creates an empty set of chains.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a new bidirectional link between the two handles.
+    ///
+    /// That means a link from `from` to `to` and from `flip_node(to)` to `flip_node(from)`.
+    /// Returns `true` if the links were added and `false` if there was already a link from `from` or `flip_node(to)`.
+    ///
+    /// New links may change the number of chains.
+    /// After all links have been added, the number of chains should be determined using [`Self::count_chains`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gbz::support::Chains;
+    ///
+    /// let mut chains = Chains::new();
+    /// let _ = chains.add_link(2, 4);
+    /// let _ = chains.add_link(4, 6);
+    /// let _ = chains.add_link(12, 14);
+    /// let _ = chains.add_link(14, 17);
+    ///
+    /// // This will fail, because link (2, 4) is also link (5, 3).
+    /// let result = chains.add_link(5, 3);
+    /// assert!(!result);
+    ///
+    /// chains.count_chains();
+    /// assert_eq!(chains.len(), 2);
+    /// assert_eq!(chains.links(), 4);
+    /// // This is the other orientation of (14, 17).
+    /// assert_eq!(chains.next(16), Some(15));
+    /// ```
+    pub fn add_link(&mut self, from: usize, to: usize) -> bool {
+        if self.next.contains_key(&from) || self.next.contains_key(&flip_node(to)) {
+            return false;
+        }
+        self.next.insert(from, to);
+        self.next.insert(flip_node(to), flip_node(from));
+        true
+    }
+
+    /// Determines the number of chains implied by the links.
+    ///
+    /// This should be called after using [`Self::add_link`].
+    pub fn count_chains(&mut self) {
+        let heads_tails = self.head_tail_nodes();
+        self.chains = heads_tails.len() / 2;
+    }
+
+    /// Returns the number of chains.
+    pub fn len(&self) -> usize {
+        self.chains
+    }
+
+    /// Returns `true` if there are no chains.
+    pub fn is_empty(&self) -> bool {
+        self.chains == 0
+    }
+
+    /// Returns the total number of links in the chains.
+    pub fn links(&self) -> usize {
+        self.next.len() / 2
+    }
+
+    /// Returns the successor for the given handle in the chains, or [`None`] if there is no successor.
+    pub fn next(&self, handle: usize) -> Option<usize> {
+        self.next.get(&handle).copied()
+    }
+
+    /// Returns `true` if the given node is a boundary node in one of the chains.
+    pub fn has_node(&self, node_id: usize) -> bool {
+        let fw_handle = encode_node(node_id, Orientation::Forward);
+        let rev_handle = encode_node(node_id, Orientation::Reverse);
+        self.next.contains_key(&fw_handle) || self.next.contains_key(&rev_handle)
+    }
+
+    /// Returns `true` if the given handle refers to a boundary node.
+    pub fn has_handle(&self, handle: usize) -> bool {
+        let rev_handle = flip_node(handle);
+        self.next.contains_key(&handle) || self.next.contains_key(&rev_handle)
+    }
+
+    /// Returns an iterator over the links, ordered by source handle.
+    ///
+    /// Filter using [`encoded_edge_is_canonical`] to visit each link in a single orientation.
+    pub fn iter(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.next.iter().map(|(k, v)| (*k, *v))
+    }
+}
+
+impl Serialize for Chains {
+    fn serialize_header<T: Write>(&self, writer: &mut T) -> io::Result<()> {
+        self.chains.serialize(writer)
+    }
+
+    fn serialize_body<T: Write>(&self, writer: &mut T) -> io::Result<()> {
+        let data = self.links_to_chains();
+        if data.len() != self.chains {
+            let msg = format!("Expected {} chains, but found {}", self.chains, data.len());
+            return Err(Error::new(ErrorKind::InvalidData, msg));
+        }
+        for chain in data.iter() {
+            chain.serialize(writer)?;
+        }
+        Ok(())
+    }
+
+    fn load<T: Read>(reader: &mut T) -> io::Result<Self> {
+        let data = Self::read_data(reader)?;
+        let chains = data.len();
+        let next = Self::link_map(data)?;
+        Ok(Self { chains, next })
+    }
+
+    fn size_in_elements(&self) -> usize {
+        let mut result = 1;
+        let data = self.links_to_chains();
+        for chain in data.iter() {
+            result += chain.size_in_elements();
+        }
+        result
+    }
+}
 
 //-----------------------------------------------------------------------------
