@@ -58,6 +58,41 @@ impl fmt::Display for Orientation {
     }
 }
 
+/// Side of a node.
+///
+/// Some graph algorithms use combinations (node id, node side) as nodes.
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NodeSide {
+    /// Left side.
+    ///
+    /// This is the entry side for [`Orientation::Forward`] and the exit side for [`Orientation::Reverse`].
+    Left = 0,
+    /// Right side.
+    ///
+    /// This is the exit side for [`Orientation::Forward`] and the entry side for [`Orientation::Reverse`].
+    Right = 1,
+}
+
+impl NodeSide {
+    /// Returns the other side.
+    #[inline]
+    pub fn flip(&self) -> NodeSide {
+        match *self {
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+        }
+    }
+}
+
+impl fmt::Display for NodeSide {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NodeSide::Left => write!(f, "left"),
+            NodeSide::Right => write!(f, "right"),
+        }
+    }
+}
+
 /// Position in a bidirected sequence graph.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GraphPosition {
@@ -185,7 +220,7 @@ impl From<Run> for SmallRun {
 
 //-----------------------------------------------------------------------------
 
-/// Returns the GBWT node identifier corresponding to the given original node and orientation.
+/// Returns the GBWT node identifier (handle) corresponding to the given original node and orientation.
 ///
 /// This encoding is used in bidirectional GBWT indexes.
 ///
@@ -202,7 +237,7 @@ pub fn encode_node(id: usize, orientation: Orientation) -> usize {
     2 * id + (orientation as usize)
 }
 
-/// Returns the original node identifier corresponding to the given GBWT node.
+/// Returns the original node identifier corresponding to the given GBWT node (handle).
 ///
 /// This encoding is used in bidirectional GBWT indexes.
 #[inline]
@@ -210,7 +245,7 @@ pub fn node_id(id: usize) -> usize {
     id / 2
 }
 
-/// Returns the orientation of the original node corresponding to the given GBWT node.
+/// Returns the orientation of the original node corresponding to the given GBWT node (handle).
 ///
 /// This encoding is used in bidirectional GBWT indexes.
 #[inline]
@@ -221,18 +256,96 @@ pub fn node_orientation(id: usize) -> Orientation {
     }
 }
 
-/// Decodes a GBWT node identifier as a node identifier and orientation in the original graph.
+/// Decodes a GBWT node identifier (handle) as a node identifier and orientation in the original graph.
 #[inline]
 pub fn decode_node(id: usize) -> (usize, Orientation) {
     (node_id(id), node_orientation(id))
 }
 
-/// Returns the GBWT node identifier for the same original node in the other orientation.
+/// Returns the GBWT node identifier (handle) for the same original node in the other orientation.
 ///
 /// This encoding is used in bidirectional GBWT indexes.
 #[inline]
 pub fn flip_node(id: usize) -> usize {
     id ^ 1
+}
+
+/// Returns the encoded node side corresponding to the given original node and node side.
+///
+/// # Arguments
+///
+/// * `id`: Identifier of the original node.
+/// * `side`: Side of the node.
+///
+/// # Panics
+///
+/// May panic if `id > usize::MAX / 2`.
+#[inline]
+pub fn encode_node_side(id: usize, side: NodeSide) -> usize {
+    2 * id + (side as usize)
+}
+
+/// Returns the original node identifier corresponding to the given encoded node side.
+#[inline]
+pub fn node_side_id(id: usize) -> usize {
+    id / 2
+}
+
+/// Returns the node side corresponding to the given encoded node side.
+#[inline]
+pub fn node_side(id: usize) -> NodeSide {
+    match id & 1 {
+        0 => NodeSide::Left,
+        _ => NodeSide::Right,
+    }
+}
+
+/// Decodes an encoded node side as a node identifier and node side in the original graph.
+#[inline]
+pub fn decode_node_side(id: usize) -> (usize, NodeSide) {
+    (node_side_id(id), node_side(id))
+}
+
+/// Returns the encoded node side for the other side of the same original node.
+#[inline]
+pub fn flip_node_side(id: usize) -> usize {
+    id ^ 1
+}
+
+/// Returns the entry side of the given orientation.
+#[inline]
+pub fn entry_side(orientation: Orientation) -> NodeSide {
+    match orientation {
+        Orientation::Forward => NodeSide::Left,
+        Orientation::Reverse => NodeSide::Right,
+    }
+}
+
+/// Returns the exit side of the given orientation.
+#[inline]
+pub fn exit_side(orientation: Orientation) -> NodeSide {
+    match orientation {
+        Orientation::Forward => NodeSide::Right,
+        Orientation::Reverse => NodeSide::Left,
+    }
+}
+
+/// Returns the orientation corresponding to the given entry side.
+#[inline]
+pub fn entry_orientation(side: NodeSide) -> Orientation {
+    match side {
+        NodeSide::Left => Orientation::Forward,
+        NodeSide::Right => Orientation::Reverse,
+    }
+}
+
+/// Returns the orientation corresponding to the given exit side.
+#[inline]
+pub fn exit_orientation(side: NodeSide) -> Orientation {
+    match side {
+        NodeSide::Left => Orientation::Reverse,
+        NodeSide::Right => Orientation::Forward,
+    }
 }
 
 //-----------------------------------------------------------------------------
