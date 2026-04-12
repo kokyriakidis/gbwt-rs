@@ -49,3 +49,10 @@ required-features = ["binaries"]
 test = false
 bench = false
 doc = false
+
+[[bin]]
+name = "build-chains"
+required-features = ["binaries"]
+test = false
+bench = false
+doc = false

@@ -363,6 +363,9 @@ pub fn path_lcs(a: &[usize], b: &[usize], graph: &GBZ) -> (Vec<(usize, usize)>, 
 /// The algorithm uses 32-bit integers internally to save memory.
 /// This is not a serious limitation, as GBWTs in the vg ecosystem also use 32-bit node identifiers in many places.
 ///
+/// NOTE: The integrated tests using `cargo test` only cover small instances.
+/// If the construction logic is modified, it should be tested with the `build-chains` binary against existing chains files.
+///
 /// # Examples
 ///
 /// ```
@@ -408,22 +411,43 @@ pub fn find_chains(graph: &GBZ) -> Chains {
         if result.is_none() {
             continue;
         }
-        let (chain_handles, is_snarl_entry) = result.unwrap();
+        let chain_handles = result.unwrap();
         drop(bridges);
 
-        // We only want to extract the subsequence that consists of boundary nodes of snarls.
-        let mut is_boundary = is_snarl_entry;
-        for i in (0..(is_boundary.len() - 1)).rev() {
-            if is_boundary[i] {
-                is_boundary[i + 1] = true;
+        // Returns `true` if the handle is a snarl entry point.
+        // Either the outdegree is > 1 or the indegree of the only successor is > 1.
+        let is_snarl_entry = |handle: u32| -> bool {
+            let mut outdegree = 0;
+            let mut first_successor = None;
+            if let Some(iter) = graph.successors(support::node_id(handle as usize), support::node_orientation(handle as usize)) {
+                for (next_id, next_o) in iter {
+                    outdegree += 1;
+                    if outdegree > 1 {
+                        return true;
+                    }
+                    first_successor = Some((next_id, next_o));
+                }
             }
-        }
+            if let Some((id, orientation)) = first_successor {
+                match graph.indegree(id, orientation) {
+                    Some(degree) => degree > 1,
+                    None => false,
+                }
+            } else {
+                false
+            }
+        };
+
+        // Returns `true` if the handle is a boundary node of a snarl.
+        let is_boundary_node = |handle: u32| -> bool {
+            is_snarl_entry(handle) || is_snarl_entry(support::flip_node(handle as usize) as u32)
+        };
 
         // Add links between consecutive boundary nodes.
-        let boundary: Vec<u32> = (0..chain_handles.len())
-            .filter(|&i| is_boundary[i])
-            .map(|i| chain_handles[i])
+        let boundary: Vec<u32> = chain_handles.iter().copied()
+            .filter(|handle| is_boundary_node(*handle))
             .collect();
+        drop(chain_handles);
         for pair in boundary.windows(2) {
             chains.add_link(pair[0] as usize, pair[1] as usize);
         }
@@ -563,13 +587,12 @@ fn find_bridge_nodes(graph: &GBZ, component: &[usize]) -> HashSet<u32> {
 }
 
 // Returns all handles in the top-level chain with `from_handle` and `to_handle` as the tips.
-// Also determines which handles are entry points to a snarl.
 // Returns `None` if there is no directed path between the tips.
 fn walk_chain(
     graph: &GBZ,
     from_handle: usize, to_handle: usize,
     bridges: &HashSet<u32>
-) -> Option<(Vec<u32>, Vec<bool>)> {
+) -> Option<Vec<u32>> {
     let shortest_path = shortest_unweighted_path(graph, from_handle, to_handle)?;
 
     // If we visit a bridge node twice, it is a hairpin-like structure instead of
@@ -590,21 +613,16 @@ fn walk_chain(
     // Now determine the handles in the top-level chain and whether they are
     // entry points to a snarl.
     let mut chain_handles: Vec<u32> = Vec::new();
-    let mut is_snarl_entry: Vec<bool> = Vec::new();
     for &handle in shortest_path.iter() {
         let is_tip = handle == from_handle as u32 || handle == to_handle as u32;
         let node_id = support::node_id(handle as usize) as u32;
         let is_unique_bridge = bridges.contains(&node_id) && !duplicate_bridges.contains(&node_id);
         if is_tip || is_unique_bridge {
             chain_handles.push(handle);
-            let orientation = support::node_orientation(handle as usize);
-            let outdegree = graph.successors(node_id as usize, orientation)
-                .map_or(0, |iter| iter.count());
-            is_snarl_entry.push(outdegree > 1);
         }
     }
 
-    Some((chain_handles, is_snarl_entry))
+    Some(chain_handles)
 }
 
 // Finds the shortest directed path between the given handles.

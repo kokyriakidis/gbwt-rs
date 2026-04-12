@@ -352,6 +352,30 @@ impl GBZ {
         let record = self.index.as_ref().record(record_id)?;
         Some(EdgeIter::new(record, true))
     }
+
+    /// Returns the number of successors of a node, or [`None`] if there is no such node.
+    ///
+    /// This is a thin wrapper over [`Self::successors`].
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id`: Identifier of the node.
+    /// * `orientation`: Orientation of the node.
+    pub fn outdegree(&self, node_id: usize, orientation: Orientation) -> Option<usize> {
+        self.successors(node_id, orientation).map(|iter| iter.len())
+    }
+
+    /// Returns the number of predecessors of a node, or [`None`] if there is no such node.
+    ///
+    /// This is a thin wrapper over [`Self::predecessors`].
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id`: Identifier of the node.
+    /// * `orientation`: Orientation of the node.
+    pub fn indegree(&self, node_id: usize, orientation: Orientation) -> Option<usize> {
+        self.predecessors(node_id, orientation).map(|iter| iter.len())
+    }
 }
 
 //-----------------------------------------------------------------------------
