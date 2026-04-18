@@ -1,6 +1,6 @@
 # Releases
 
-## Current version
+## GBZ 0.6.1 (2026-04-17)
 
 * Command line arguments can use suffixes (e.g. `k`, `MiB`) for sizes and counts that can plausibly be large.
 * Top-level chains:
@@ -85,11 +85,15 @@ The first pre-release includes supports the GBWT Simple-SDS file format as well 
 
 ## Release process
 
+* Clean up with `cargo clean`.
+* Update version in `Cargo.toml`.
+* Switch to crates.io versions of dependencies, if necessary.
+* Update `RELEASES.md`.
 * Run `cargo clippy --features=binaries`.
 * Run tests with `cargo test` and `cargo test -- --ignored`.
 * Build documentation with `cargo doc`.
-* Update version in `Cargo.toml`.
-* Update `RELEASES.md`.
+* Build the optimized version with `cargo build --release --features=binaries`.
+* Commit the final changes for the release.
 * Publish in crates.io with `cargo publish`.
 * Push to GitHub.
 * Draft a new release in GitHub.
